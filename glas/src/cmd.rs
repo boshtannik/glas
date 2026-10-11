@@ -1,35 +1,35 @@
-//! Единый источник протокола QML ↔ воркер.
+//! Single source of truth for the QML ↔ worker protocol.
 //!
-//! `serde` генерирует и имя команды, и поля JSON из этого одного определения:
-//! переименование или опечатка ключа невозможна. QML зеркалит имена команд
-//! константами (см. `vault/Архитектура.md`).
+//! `serde` derives both the command name and the JSON fields from this one
+//! definition, so a rename or a typo in a key is impossible. QML mirrors the
+//! command names as constants (see `vault/Архитектура.md`).
 
 use serde::{Deserialize, Serialize};
 
-/// Команды, которые QML шлёт воркеру как JSON `{"cmd": <name>, ...fields}`.
+/// Commands that QML sends to the worker as JSON `{"cmd": <name>, ...fields}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Cmd {
-    /// Начать прослушивание микрофона.
+    /// Start listening on the microphone.
     Listen,
-    /// Остановить запись.
+    /// Stop recording.
     Stop,
-    /// Отменить текущую обработку.
+    /// Cancel the current processing.
     Cancel,
-    /// Откатить действие по id.
+    /// Undo an action by id.
     Undo { id: String },
-    /// Запросить список навыков.
+    /// Request the list of skills.
     SkillList,
-    /// Включить/выключить навык.
+    /// Enable/disable a skill.
     SkillEnable { id: String, on: bool },
-    /// Импортировать навык по ссылке.
+    /// Import a skill from a URL.
     SkillImportUrl { url: String },
-    /// Запросить текущие настройки.
+    /// Request the current settings.
     GetSettings,
 }
 
 impl Cmd {
-    /// Сериализация в JSON-конверт очереди команд.
+    /// Serialize into the JSON envelope used by the command queue.
     pub fn to_value(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }

@@ -1,26 +1,26 @@
-//! Настройки приложения (`~/.config/harbour-glas/settings.json`).
+//! Application settings (`~/.config/harbour-glas/settings.json`).
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Пользовательские настройки. Значения по умолчанию зашиты здесь; частичное
-/// сохранение переживает добавление новых полей.
+/// User settings. Defaults are hard-coded here; a partial save survives the
+/// addition of new fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    /// Язык интерфейса и распознавания ("ru"/"en").
+    /// UI and recognition language ("ru"/"en").
     #[serde(default = "default_language")]
     pub language: String,
-    /// Сколько пар реплик держать в скользящем окне контекста.
+    /// How many turns to keep in the sliding context window.
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
-    /// Лимит токенов контекста.
+    /// Context token limit.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
-    /// Режим TTS: "off" | "button" | "auto".
+    /// TTS mode: "off" | "button" | "auto".
     #[serde(default = "default_tts_mode")]
     pub tts_mode: String,
-    /// Через сколько секунд простоя выгружать модели из памяти.
+    /// Seconds of idleness after which models are unloaded from memory.
     #[serde(default = "default_idle_unload_secs")]
     pub idle_unload_secs: u64,
 }
@@ -54,7 +54,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Путь к файлу настроек.
+    /// Path to the settings file.
     pub fn path() -> PathBuf {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -62,7 +62,7 @@ impl Settings {
         home.join(".config/harbour-glas/settings.json")
     }
 
-    /// Загрузка: при отсутствии/повреждении файла — значения по умолчанию.
+    /// Load: on a missing/corrupt file, fall back to defaults.
     pub fn load() -> Self {
         let path = Self::path();
         std::fs::read_to_string(&path)
@@ -71,7 +71,7 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    /// Атомарная запись (tmp + rename).
+    /// Atomic write (tmp + rename).
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
         if let Some(dir) = path.parent() {
@@ -82,7 +82,7 @@ impl Settings {
         std::fs::rename(tmp, path)
     }
 
-    /// JSON-представление для QML.
+    /// JSON representation for QML.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }

@@ -3,21 +3,21 @@ target/
 glas/target/
 *.rs.bk
 
-# Кэш сборки/артефакты RPM
+# Build cache / RPM artifacts
 *.rpm
 .resolve.out
 
-# Логи
+# Logs
 *.log
 
-# Обсидиан-мусор
+# Obsidian junk
 .vault-trash/
 
-# Тяжёлое/экспериментальное (готовится скриптами, не тащим в git)
+# Heavy/experimental (prepared by scripts, not committed)
 /third_party/
 /sfos-sysroot/
 /spike/
 
-# Локальные редакторские настройки
+# Local editor settings
 .idea/
 *.swp

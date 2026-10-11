@@ -1,7 +1,8 @@
-//! Аудио-стек: запись, воспроизведение, STT (whisper.cpp), TTS (piper), VAD.
+//! Audio stack: recording, playback, STT (whisper.cpp), TTS (piper), VAD.
 //!
-//! Весь модуль собирается только с фичей `voice` (зависит от `cpal`/`hound`,
-//! которым нужен ALSA-dev). Без фичи каркас всё равно собирается.
+//! This whole module is built only with the `voice` feature (it depends on
+//! `cpal`/`hound`, which need ALSA dev headers). Without the feature the
+//! skeleton still compiles.
 
 pub mod player;
 pub mod recorder;

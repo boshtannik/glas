@@ -1,12 +1,12 @@
 #!/bin/sh
-# Сборка harbour-glas (RPM) через mb2 в Docker-образе sailo-rs (Rust + SFOS SDK).
+# Build harbour-glas (RPM) via mb2 in the sailo-rs Docker image (Rust + SFOS SDK).
 #
-# Использование:
-#   sg docker -c "./mbuild.sh"            # debug — быстро, без оптимизаций
-#   sg docker -c "./mbuild.sh --release"  # release — с оптимизациями
+# Usage:
+#   sg docker -c "./mbuild.sh"            # debug — fast, no optimizations
+#   sg docker -c "./mbuild.sh --release"  # release — optimized
 #
-# Кэш cargo-target лежит на хосте (CACHE) и переживает перезапуски контейнера:
-# инкрементальная сборка трогает только изменённые крейты.
+# The cargo-target cache lives on the host (CACHE) and survives container runs:
+# rebuilds touch only the changed crates.
 set -e
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
@@ -19,11 +19,11 @@ for arg in "$@"; do
     case "$arg" in
         --release) MODE=release ;;
         -h|--help)
-            echo "Сборка harbour-glas (RPM)."
-            echo "  ./mbuild.sh            — debug (по умолчанию, быстро)."
-            echo "  ./mbuild.sh --release  — со всеми оптимизациями."
+            echo "Build harbour-glas (RPM)."
+            echo "  ./mbuild.sh            — debug (default, fast)."
+            echo "  ./mbuild.sh --release  — fully optimized."
             exit 0 ;;
-        *) echo "неизвестный флаг: $arg (допустим только --release)"; exit 1 ;;
+        *) echo "unknown flag: $arg (only --release is allowed)"; exit 1 ;;
     esac
 done
 
@@ -52,7 +52,7 @@ docker run --rm \
     --exclude=./sfos-sysroot \
     . | tar -xf - -C ~/glas-build
   cd ~/glas-build
-  # whisper.cpp (STT) — в $HOME/cargo-cache (персистентный том).
+  # whisper.cpp (STT) — in $HOME/cargo-cache (a persistent volume).
   if [ ! -d "$HOME/cargo-cache/whisper.cpp" ]; then
     curl -fsSL -o /tmp/whisper.cpp.tar.gz \
       "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v1.5.4.tar.gz"
@@ -61,15 +61,15 @@ docker run --rm \
   fi
   mkdir -p third_party
   ln -sfn "$HOME/cargo-cache/whisper.cpp" third_party/whisper.cpp
-  # Патч whisper-cli: добавляет --audio-ctx (ускоряет распознавание).
+  # whisper-cli patch: adds --audio-ctx (speeds up recognition).
   if ! grep -qF -- "--audio-ctx" third_party/whisper.cpp/examples/main/main.cpp; then
     patch -p1 -d third_party/whisper.cpp < /src/packaging/whisper-cli-audio-ctx.patch
-    echo "whisper-cli: патч --audio-ctx применён"
+    echo "whisper-cli: --audio-ctx patch applied"
   else
-    echo "whisper-cli: патч --audio-ctx уже применён"
+    echo "whisper-cli: --audio-ctx patch already applied"
   fi
   ls -d third_party/whisper.cpp
-  # Piper (TTS): готовый статический aarch64-билд.
+  # Piper (TTS): a ready-made static aarch64 build.
   if [ ! -e "$HOME/cargo-cache/piper-aarch64/piper/piper" ]; then
     curl -fsSL -o /tmp/piper-aarch64.tar.gz \
       "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz"
@@ -79,7 +79,7 @@ docker run --rm \
   fi
   find "$HOME/cargo-cache/piper-aarch64" -maxdepth 2 -name piper -type f
   ls -l "$HOME/cargo-cache/piper-aarch64/piper"
-  # TODO(этап LLM): скачивание/сборка llama.cpp.
+  # TODO(LLM stage): download/build llama.cpp.
   mb2 -n -t SailfishOS-5.1.0.11-aarch64 --no-snapshot=force build
   echo "=== RPM ($MBUILD_MODE) ==="
   ls -l RPMS/*.rpm

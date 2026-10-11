@@ -7,13 +7,14 @@ use sailors::sailfishapp::QmlApp;
 
 use glas::bridge::app::AppBridge;
 
-/// Единственный QML-файл приложения (`/usr/share/harbour-glas/qml`).
+/// The only QML file of the application (`/usr/share/harbour-glas/qml`).
 const MAIN_QML: &str = "qml/harbour-glas.qml";
-/// Имя приложения: определяет каталог данных `SailfishApp::pathTo` и argv[0].
+/// Application name: determines both the data directory `SailfishApp::pathTo`
+/// and argv[0].
 const APP_NAME: &str = "harbour-glas";
 
-/// Логгер пишет и в stderr, и в `~/.cache/harbour-glas/app.log`
-/// (при запуске через booster stdout теряется).
+/// Logger writes both to stderr and to `~/.cache/harbour-glas/app.log`
+/// (when started via booster, stdout is inherited and lost).
 struct Tee(std::fs::File);
 
 impl std::io::Write for Tee {
@@ -59,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bridge = RefCell::new(AppBridge::default());
     let bridge_pinned = unsafe { QObjectPinned::new(&bridge) };
 
-    // QML живёт в главном потоке; exec() блокирует до закрытия окна.
+    // QML runs on the main thread; exec() blocks until the window is closed.
     let mut app = QmlApp::application(APP_NAME.to_string());
     app.set_object_property("bridge".into(), bridge_pinned);
     app.set_source(QmlApp::path_to(MAIN_QML.into()));

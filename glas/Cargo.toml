@@ -2,7 +2,7 @@
 name = "glas"
 version = "0.1.0"
 edition = "2021"
-description = "Glas — голосовой ассистент управления телефоном для Sailfish OS"
+description = "Glas — an on-device voice assistant for Sailfish OS"
 license = "MIT"
 publish = false
 

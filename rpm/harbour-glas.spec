@@ -1,5 +1,5 @@
 Name:       harbour-glas
-Summary:    Glas — голосовой ассистент управления телефоном
+Summary:    Glas — a voice assistant that controls the phone
 Version:    0.1
 Release:    1
 Group:      Qt/Qt
@@ -15,15 +15,15 @@ BuildRequires:  pkgconfig(Qt5Qml)
 BuildRequires:  pkgconfig(Qt5Quick)
 BuildRequires:  pkgconfig(sailfishapp)
 
-# Не даём rpmbuild стрипать бандл (аналогично референсу): brp-strip может
-# испортить вложенные бинарники движков.
+# Do not let rpmbuild strip the bundle (same as the reference): brp-strip can
+# corrupt the nested engine binaries.
 %global debug_package %{nil}
 %global __strip /bin/true
 
 %description
-Glas — локальный голосовой ассистент для Sailfish OS: распознавание речи,
-локальная LLM, синтез речи и навыки управления функциями телефона (таймер,
-будильник, SMS). Работает офлайн.
+Glas — an on-device voice assistant for Sailfish OS: speech recognition,
+a local LLM, speech synthesis and skills that drive phone functions (timer,
+alarm, SMS). Works offline.
 
 # - PREP -----------------------------------------------------------------------
 %prep
@@ -54,7 +54,7 @@ case "$MODE" in
     ;;
 esac
 
-# whisper.cpp: статический whisper-cli (STT). Подготовлен mbuild.sh (симлинк).
+# whisper.cpp: a static whisper-cli (STT). Prepared by mbuild.sh (symlink).
 cd ../third_party/whisper.cpp
 make -j1 \
   UNAME_M=generic \
@@ -64,11 +64,11 @@ make -j1 \
 test -x main
 ls -l main
 
-# Piper (TTS): готовый aarch64-билд из кэша (качает mbuild.sh).
+# Piper (TTS): a ready-made aarch64 build from the cache (downloaded by mbuild.sh).
 test -x /home/mersdk/cargo-cache/piper-aarch64/piper/piper
 ls -l /home/mersdk/cargo-cache/piper-aarch64/piper
 
-# TODO(этап LLM): сборка llama.cpp (libllama + сервер/CLI) для intent-движка.
+# TODO(LLM stage): build llama.cpp (libllama + server/CLI) for the intent engine.
 
 # - INSTALL --------------------------------------------------------------------
 %install

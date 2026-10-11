@@ -7,9 +7,9 @@ ApplicationWindow {
 
     initialPage: DialogPage {}
 
-    // Статус моста виден и на обложке, и в диалоге.
+    // The bridge status is shown both on the cover and in the dialog.
     property string statusText: (bridge !== undefined) ? bridge.status : "idle"
-    // Последний ответ ассистента.
+    // Last assistant answer.
     property string answerText: (bridge !== undefined) ? bridge.answer : ""
 
     cover: Component {

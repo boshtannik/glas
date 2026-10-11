@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
 
-//! Glas — голосовой ассистент управления телефоном для Sailfish OS.
+//! Glas — a voice assistant that controls the phone, for Sailfish OS.
 //!
-//! Каркас (стоп-точка №1): связка Rust ↔ QML + пустое окно.
-//! Дальше по плану (см. `vault/План.md`): audio, intent (llama.cpp),
+//! Skeleton (stop-point #1): the Rust ↔ QML bridge plus an empty window.
+//! Next up (see `vault/План.md`): audio, intent (llama.cpp),
 //! skills, history.
 
 pub mod bridge;

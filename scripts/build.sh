@@ -1,10 +1,10 @@
 #!/bin/sh
-# Сборка glas (кросс-сборка под aarch64 для Sailfish OS).
+# Build glas (cross-compiled for aarch64 / Sailfish OS).
 #
-# Использование:
-#   scripts/build.sh          # debug, host (проверка)
+# Usage:
+#   scripts/build.sh          # debug, host (check)
 #   scripts/build.sh -r       # release, host
-#   scripts/build.sh -a       # debug, aarch64 (телефон)
+#   scripts/build.sh -a       # debug, aarch64 (phone)
 #   scripts/build.sh -ar      # release, aarch64
 set -e
 
@@ -17,7 +17,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         -a|--aarch64) TARGET="--target aarch64-unknown-linux-gnu" ;;
         -r|--release) RELEASE="--release" ;;
-        *) echo "неизвестный флаг: $1"; exit 1 ;;
+        *) echo "unknown flag: $1"; exit 1 ;;
     esac
     shift
 done

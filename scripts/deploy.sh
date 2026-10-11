@@ -1,14 +1,14 @@
 #!/bin/sh
-# Деплой бинаря glas на телефон Sailfish OS.
+# Deploy the glas binary to a Sailfish OS phone.
 #
-# Переменные окружения (или дефолты):
-#   SFOS_HOST      — хост телефона (по умолчанию 172.28.172.1)
-#   SFOS_USER      — пользователь (defaultuser)
-#   SFOS_PASS      — пароль SSH
+# Environment variables (or defaults):
+#   SFOS_HOST      — phone host (default 172.28.172.1)
+#   SFOS_USER      — user (defaultuser)
+#   SFOS_PASS      — SSH password
 #
-# Использование:
-#   scripts/deploy.sh                           # бинарь debug aarch64
-#   scripts/deploy.sh -r                        # бинарь release aarch64
+# Usage:
+#   scripts/deploy.sh                           # debug aarch64 binary
+#   scripts/deploy.sh -r                        # release aarch64 binary
 #   SFOS_PASS=<your-ssh-password> scripts/deploy.sh -r
 set -e
 
@@ -21,7 +21,7 @@ RELEASE=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -r|--release) RELEASE="--release" ;;
-        *) echo "неизвестный флаг: $1"; exit 1 ;;
+        *) echo "unknown flag: $1"; exit 1 ;;
     esac
     shift
 done
@@ -33,10 +33,10 @@ cargo build $RELEASE --target aarch64-unknown-linux-gnu
 
 BIN="target/aarch64-unknown-linux-gnu/${RELEASE:-debug}/harbour-glas"
 if [ ! -f "$BIN" ]; then
-    echo "бинарь не найден: $BIN"; exit 1
+    echo "binary not found: $BIN"; exit 1
 fi
 
-echo "==> копируем $BIN на $USER@$HOST"
+echo "==> copying $BIN to $USER@$HOST"
 if [ -n "$PASS" ]; then
     sshpass -p "$PASS" scp $SSH_OPTS "$BIN" "$USER@$HOST:~"
 else
@@ -44,4 +44,4 @@ else
 fi
 
 echo
-echo "OK: бинарь доставлен в ~/$USER (harbour-glas)"
+echo "OK: binary delivered to ~/$USER (harbour-glas)"
