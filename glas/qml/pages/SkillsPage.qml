@@ -1,36 +1,31 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 
-Item {
-    id: skillsPage
+Page {
+    id: page
 
-    property var appWindow
+    PageHeader {
+        id: pageHeader
+        title: qsTr("Skills")
+    }
 
     SilicaFlickable {
-        anchors.fill: parent
-        contentHeight: column.height + Theme.paddingLarge
-
-        PageHeader {
-            id: pageHeader
-            title: qsTr("Skills")
+        anchors {
+            top: pageHeader.bottom
+            left: parent.left
+            right: parent.right
+            bottom: parent.bottom
         }
+        contentHeight: label.height + Theme.paddingLarge
 
-        Column {
-            id: column
-            anchors {
-                top: pageHeader.bottom
-                left: parent.left
-                right: parent.right
-            }
-            spacing: Theme.paddingMedium
-
-            Label {
-                x: Theme.horizontalPageMargin
-                width: parent.width - 2 * Theme.horizontalPageMargin
-                wrapMode: Text.Wrap
-                text: qsTr("Skeleton: the skill list, .gskill import and enable toggles are coming later.")
-                color: Theme.secondaryColor
-            }
+        Label {
+            id: label
+            x: Theme.horizontalPageMargin
+            y: Theme.paddingLarge
+            width: parent.width - 2 * Theme.horizontalPageMargin
+            wrapMode: Text.Wrap
+            color: Theme.secondaryColor
+            text: qsTr("Skeleton: the skill list, .gskill import and enable toggles are coming later.")
         }
     }
 }

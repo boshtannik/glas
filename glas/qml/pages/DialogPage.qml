@@ -2,14 +2,25 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components"
 
-Item {
+Page {
     id: dialogPage
-
-    property var appWindow
 
     PageHeader {
         id: pageHeader
         title: qsTr("Glas")
+    }
+
+    // Always-visible action in the header: no need to scroll the transcript
+    // to reach the settings. `extraContent` is a read-only slot, so the button
+    // is reparented into it (as in system apps).
+    IconButton {
+        parent: pageHeader.extraContent
+        anchors {
+            left: parent.left
+            verticalCenter: parent.verticalCenter
+        }
+        icon.source: "image://theme/icon-m-menu"
+        onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
     }
 
     // Transcript / status area above the push-to-talk button.
@@ -35,7 +46,7 @@ Item {
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
-                text: dialogPage.appWindow.statusText
+                text: (typeof bridge !== "undefined") ? bridge.status : "idle"
                 color: Theme.secondaryColor
             }
 
@@ -44,7 +55,7 @@ Item {
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
-                text: dialogPage.appWindow.answerText
+                text: (typeof bridge !== "undefined") ? bridge.answer : ""
                 color: Theme.highlightColor
             }
         }
@@ -68,11 +79,11 @@ Item {
                 bottomMargin: Theme.paddingLarge
             }
             onPressed: {
-                if (bridge !== undefined)
+                if (typeof bridge !== "undefined")
                     bridge.request("(skeleton: push-to-talk start)")
             }
             onReleased: {
-                if (bridge !== undefined)
+                if (typeof bridge !== "undefined")
                     bridge.cancel()
             }
         }

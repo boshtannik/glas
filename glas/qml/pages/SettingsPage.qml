@@ -1,36 +1,43 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 
-Item {
+Page {
     id: settingsPage
 
-    property var appWindow
+    PageHeader {
+        id: pageHeader
+        title: qsTr("Settings")
+    }
 
-    SilicaFlickable {
-        anchors.fill: parent
-        contentHeight: column.height + Theme.paddingLarge
-
-        PageHeader {
-            id: pageHeader
-            title: qsTr("Settings")
+    // One entry point for every category; picking one opens its editor only.
+    SilicaListView {
+        anchors {
+            top: pageHeader.bottom
+            left: parent.left
+            right: parent.right
+            bottom: parent.bottom
         }
-
-        Column {
-            id: column
-            anchors {
-                top: pageHeader.bottom
-                left: parent.left
-                right: parent.right
-            }
-            spacing: Theme.paddingMedium
+        model: [
+            { title: qsTr("General"), page: "GeneralSettingsPage.qml" },
+            { title: qsTr("Voice models"), page: "VoiceModelsPage.qml" },
+            { title: qsTr("Skills"), page: "SkillsPage.qml" },
+            { title: qsTr("Memory"), page: "MemoryPage.qml" }
+        ]
+        delegate: BackgroundItem {
+            width: ListView.view.width
+            height: Theme.itemSizeMedium
 
             Label {
+                anchors.verticalCenter: parent.verticalCenter
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
-                wrapMode: Text.Wrap
-                text: qsTr("Skeleton: language, TTS, context-window and model-unload switches are coming later.")
-                color: Theme.secondaryColor
+                text: model.title
+                color: parent.highlighted ? Theme.highlightColor : Theme.primaryColor
             }
+
+            onClicked: pageStack.push(Qt.resolvedUrl(model.page))
         }
+
+        VerticalScrollDecorator {}
     }
 }
