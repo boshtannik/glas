@@ -6,7 +6,7 @@ use glas_memory::{now_secs, Memory, Source};
 use qmetaobject::*;
 
 use crate::settings::Settings;
-use crate::voice::{self, Recorder};
+use crate::voice::{self, Recorder, VoiceStore};
 
 /// Rust ↔ QML bridge.
 ///
@@ -41,6 +41,9 @@ pub struct AppBridge {
 
     /// WAV file of the current/last recording.
     wav: PathBuf,
+
+    /// Shared voice-model catalog, selection and downloads.
+    voice: VoiceStore,
 
     /// Liveness check for the bridge.
     ping: qt_method!(fn ping(&self) -> QString {
@@ -152,6 +155,18 @@ pub struct AppBridge {
         }
         self.answer_changed();
         self.set_status_rs("idle");
+    }),
+
+    /// QML: voice store snapshot (`{models, stt, tts, lang, langs, version}`).
+    voice_status_json: qt_method!(fn voice_status_json(&mut self) -> QString {
+        QString::from(self.voice.status_json())
+    }),
+
+    /// QML: voice store command (`voice_download`, `voice_select_stt`, ...).
+    voice_command: qt_method!(fn voice_command(&mut self, cmd: QString, val: QString) {
+        let cmd = cmd.to_string();
+        let val = val.to_string();
+        self.voice.command(&cmd, &val);
     }),
 
     /// QML: the profile as JSON (`{schema, facts:{key:{value,updated,source}}}`).
