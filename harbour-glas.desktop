@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Glas
+Comment=Voice assistant for Sailfish OS
+Icon=harbour-glas
+Exec=harbour-glas
+
+[X-Sailjail]
+Sandboxing=Disabled

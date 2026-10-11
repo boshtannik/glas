@@ -1,0 +1,33 @@
+--- a/examples/main/main.cpp	
++++ b/examples/main/main.cpp	
+@@ -61,6 +61,7 @@
+     int32_t duration_ms  =  0;
+     int32_t progress_step =  5;
+     int32_t max_context  = -1;
++    int32_t audio_ctx    =  0;
+     int32_t max_len      =  0;
+     int32_t best_of      = whisper_full_default_params(WHISPER_SAMPLING_GREEDY).greedy.best_of;
+     int32_t beam_size    = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH).beam_search.beam_size;
+@@ -132,6 +133,7 @@
+         else if (arg == "-on"   || arg == "--offset-n")        { params.offset_n        = std::stoi(argv[++i]); }
+         else if (arg == "-d"    || arg == "--duration")        { params.duration_ms     = std::stoi(argv[++i]); }
+         else if (arg == "-mc"   || arg == "--max-context")     { params.max_context     = std::stoi(argv[++i]); }
++        else if (arg == "-c"    || arg == "--audio-ctx")      { params.audio_ctx       = std::stoi(argv[++i]); }
+         else if (arg == "-ml"   || arg == "--max-len")         { params.max_len         = std::stoi(argv[++i]); }
+         else if (arg == "-bo"   || arg == "--best-of")         { params.best_of         = std::stoi(argv[++i]); }
+         else if (arg == "-bs"   || arg == "--beam-size")       { params.beam_size       = std::stoi(argv[++i]); }
+@@ -189,6 +191,7 @@
+     fprintf(stderr, "  -on N,     --offset-n N        [%-7d] segment index offset\n",                           params.offset_n);
+     fprintf(stderr, "  -d  N,     --duration N        [%-7d] duration of audio to process in milliseconds\n",   params.duration_ms);
+     fprintf(stderr, "  -mc N,     --max-context N     [%-7d] maximum number of text context tokens to store\n", params.max_context);
++    fprintf(stderr, "  -c  N,     --audio-ctx N       [%-7d] overwrite the audio context size (0=default)\n", params.audio_ctx);
+     fprintf(stderr, "  -ml N,     --max-len N         [%-7d] maximum segment length in characters\n",           params.max_len);
+     fprintf(stderr, "  -sow,      --split-on-word     [%-7s] split on word rather than on token\n",             params.split_on_word ? "true" : "false");
+     fprintf(stderr, "  -bo N,     --best-of N         [%-7d] number of best candidates to keep\n",              params.best_of);
+@@ -951,6 +954,7 @@
+             wparams.detect_language  = params.detect_language;
+             wparams.n_threads        = params.n_threads;
+             wparams.n_max_text_ctx   = params.max_context >= 0 ? params.max_context : wparams.n_max_text_ctx;
++            wparams.audio_ctx        = params.audio_ctx;
+             wparams.offset_ms        = params.offset_t_ms;
+             wparams.duration_ms      = params.duration_ms;

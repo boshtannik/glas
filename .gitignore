@@ -1,0 +1,23 @@
+# Rust
+target/
+glas/target/
+*.rs.bk
+
+# Кэш сборки/артефакты RPM
+*.rpm
+.resolve.out
+
+# Логи
+*.log
+
+# Обсидиан-мусор
+.vault-trash/
+
+# Тяжёлое/экспериментальное (готовится скриптами, не тащим в git)
+/third_party/
+/sfos-sysroot/
+/spike/
+
+# Локальные редакторские настройки
+.idea/
+*.swp
