@@ -2,46 +2,55 @@ import QtQuick 2.6
 import Sailfish.Silica 1.0
 import "../components"
 
-Page {
-    id: page
+Item {
+    id: dialogPage
 
-    PullDownMenu {
-        MenuItem {
-            text: qsTr("Settings")
-            onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
-        }
-        MenuItem {
-            text: qsTr("Voice models")
-            onClicked: pageStack.push(Qt.resolvedUrl("VoiceModelsPage.qml"))
-        }
-        MenuItem {
-            text: qsTr("Skills")
-            onClicked: pageStack.push(Qt.resolvedUrl("SkillsPage.qml"))
-        }
-    }
+    property var appWindow
 
-    Column {
-        anchors.centerIn: parent
-        spacing: Theme.paddingLarge
-        width: parent.width
+    SilicaFlickable {
+        anchors.fill: parent
+        contentHeight: column.height + Theme.paddingLarge
 
-        MicButton {
-            id: mic
-            anchors.horizontalCenter: parent.horizontalCenter
-            onClicked: {
-                if (bridge !== undefined) {
-                    bridge.request("(skeleton: recognition not wired yet)")
+        PageHeader {
+            id: pageHeader
+            title: qsTr("Glas")
+        }
+
+        Column {
+            id: column
+            anchors {
+                top: pageHeader.bottom
+                left: parent.left
+                right: parent.right
+            }
+            spacing: Theme.paddingLarge
+
+            MicButton {
+                id: mic
+                anchors.horizontalCenter: parent.horizontalCenter
+                onClicked: {
+                    if (bridge !== undefined)
+                        bridge.request("(skeleton: recognition not wired yet)")
                 }
             }
-        }
 
-        Label {
-            anchors.horizontalCenter: parent.horizontalCenter
-            width: parent.width - 2 * Theme.horizontalPageMargin
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.Wrap
-            text: app.answerText
-            color: Theme.secondaryColor
+            Label {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                text: dialogPage.appWindow.statusText
+                color: Theme.secondaryColor
+            }
+
+            Label {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                text: dialogPage.appWindow.answerText
+                color: Theme.highlightColor
+            }
         }
     }
 }

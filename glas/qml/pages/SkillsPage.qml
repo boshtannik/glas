@@ -1,19 +1,28 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 
-Page {
-    id: page
+Item {
+    id: skillsPage
+
+    property var appWindow
 
     SilicaFlickable {
         anchors.fill: parent
         contentHeight: column.height + Theme.paddingLarge
 
+        PageHeader {
+            id: pageHeader
+            title: qsTr("Skills")
+        }
+
         Column {
             id: column
-            width: parent.width
+            anchors {
+                top: pageHeader.bottom
+                left: parent.left
+                right: parent.right
+            }
             spacing: Theme.paddingMedium
-
-            PageHeader { title: qsTr("Skills") }
 
             Label {
                 x: Theme.horizontalPageMargin
@@ -23,7 +32,5 @@ Page {
                 color: Theme.secondaryColor
             }
         }
-
-        VerticalScrollDecorator {}
     }
 }
