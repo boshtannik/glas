@@ -26,6 +26,12 @@ pub enum Cmd {
     SkillImportUrl { url: String },
     /// Request the current settings.
     GetSettings,
+    /// List stored long-term memory facts.
+    MemoryList,
+    /// Store a preference fact (requires user confirmation in the UI).
+    MemorySet { key: String, value: String },
+    /// Forget a preference fact.
+    MemoryForget { key: String },
 }
 
 impl Cmd {
