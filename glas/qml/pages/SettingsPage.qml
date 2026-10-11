@@ -31,11 +31,11 @@ Page {
                 anchors.verticalCenter: parent.verticalCenter
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
-                text: model.title
+                text: modelData.title
                 color: parent.highlighted ? Theme.highlightColor : Theme.primaryColor
             }
 
-            onClicked: pageStack.push(Qt.resolvedUrl(model.page))
+            onClicked: pageStack.push(Qt.resolvedUrl(modelData.page))
         }
 
         VerticalScrollDecorator {}
