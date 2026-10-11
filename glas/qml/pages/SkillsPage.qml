@@ -13,13 +13,13 @@ Page {
             width: parent.width
             spacing: Theme.paddingMedium
 
-            PageHeader { title: qsTr("Навыки") }
+            PageHeader { title: qsTr("Skills") }
 
             Label {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
-                text: qsTr("Каркас: список навыков, импорт .gskill и тумблеры включения появятся позже.")
+                text: qsTr("Skeleton: the skill list, .gskill import and enable toggles are coming later.")
                 color: Theme.secondaryColor
             }
         }

@@ -17,7 +17,7 @@ pub struct WhisperStt {
 
 #[derive(Debug, Error)]
 pub enum SttError {
-    #[error("whisper-cli не найден по пути {0}")]
+    #[error("whisper-cli not found at {0}")]
     NotFound(PathBuf),
     #[error("whisper-cli failed: {0}")]
     Run(String),

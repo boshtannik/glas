@@ -11,15 +11,15 @@ pub struct Player;
 
 #[derive(Debug, Error)]
 pub enum PlayError {
-    #[error("нет устройства вывода")]
+    #[error("no output device")]
     NoOutputDevice,
-    #[error("нет поддерживаемого формата: {0}")]
+    #[error("no supported format: {0}")]
     NoSupportedFormat(String),
-    #[error("не удалось открыть поток: {0}")]
+    #[error("failed to open stream: {0}")]
     StreamError(String),
-    #[error("ошибка чтения WAV: {0}")]
+    #[error("WAV read error: {0}")]
     Wav(#[from] hound::Error),
-    #[error("пустой/нечитаемый WAV")]
+    #[error("empty/unreadable WAV")]
     EmptyWav,
 }
 

@@ -13,11 +13,11 @@ pub struct PiperTts {
 
 #[derive(Debug, Error)]
 pub enum TtsError {
-    #[error("piper не найден по пути {0}")]
+    #[error("piper not found at {0}")]
     NotFound(PathBuf),
     #[error("piper failed: {0}")]
     Run(String),
-    #[error("запись stdin не удалась")]
+    #[error("failed to write to stdin")]
     StdinWrite,
 }
 

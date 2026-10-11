@@ -7,15 +7,15 @@ Page {
 
     PullDownMenu {
         MenuItem {
-            text: qsTr("Настройки")
+            text: qsTr("Settings")
             onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
         }
         MenuItem {
-            text: qsTr("Голосовые модели")
+            text: qsTr("Voice models")
             onClicked: pageStack.push(Qt.resolvedUrl("VoiceModelsPage.qml"))
         }
         MenuItem {
-            text: qsTr("Навыки")
+            text: qsTr("Skills")
             onClicked: pageStack.push(Qt.resolvedUrl("SkillsPage.qml"))
         }
     }
@@ -30,7 +30,7 @@ Page {
             anchors.horizontalCenter: parent.horizontalCenter
             onClicked: {
                 if (bridge !== undefined) {
-                    bridge.request("(каркас: распознавание ещё не подключено)")
+                    bridge.request("(skeleton: recognition not wired yet)")
                 }
             }
         }

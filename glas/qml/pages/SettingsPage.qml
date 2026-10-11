@@ -13,13 +13,13 @@ Page {
             width: parent.width
             spacing: Theme.paddingMedium
 
-            PageHeader { title: qsTr("Настройки") }
+            PageHeader { title: qsTr("Settings") }
 
             Label {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
-                text: qsTr("Каркас: переключатели языка, TTS, окна контекста и выгрузки моделей появятся позже.")
+                text: qsTr("Skeleton: language, TTS, context-window and model-unload switches are coming later.")
                 color: Theme.secondaryColor
             }
         }

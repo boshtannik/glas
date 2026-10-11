@@ -18,13 +18,13 @@ pub struct Recorder {
 
 #[derive(Debug, Error)]
 pub enum RecordError {
-    #[error("нет устройства захвата")]
+    #[error("no capture device")]
     NoInputDevice,
-    #[error("нет поддерживаемого формата: {0}")]
+    #[error("no supported format: {0}")]
     NoSupportedFormat(String),
-    #[error("не удалось открыть поток: {0}")]
+    #[error("failed to open stream: {0}")]
     StreamError(String),
-    #[error("ошибка WAV-записи: {0}")]
+    #[error("WAV write error: {0}")]
     Wav(#[from] hound::Error),
 }
 

@@ -13,13 +13,13 @@ Page {
             width: parent.width
             spacing: Theme.paddingMedium
 
-            PageHeader { title: qsTr("Голосовые модели") }
+            PageHeader { title: qsTr("Voice models") }
 
             Label {
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
                 wrapMode: Text.Wrap
-                text: qsTr("Каркас: каталог GGUF-моделей и проверка влезаемости в память появятся позже.")
+                text: qsTr("Skeleton: the GGUF model catalog and memory-fit checks are coming later.")
                 color: Theme.secondaryColor
             }
         }
