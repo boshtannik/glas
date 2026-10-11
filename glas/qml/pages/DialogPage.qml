@@ -23,6 +23,17 @@ Page {
         onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
     }
 
+    // Copy the transcription result from the background worker into the UI.
+    Timer {
+        interval: 250
+        running: true
+        repeat: true
+        onTriggered: {
+            if (typeof bridge !== "undefined")
+                bridge.poll()
+        }
+    }
+
     // Transcript / status area above the push-to-talk button.
     SilicaFlickable {
         id: transcript
@@ -80,11 +91,11 @@ Page {
             }
             onPressed: {
                 if (typeof bridge !== "undefined")
-                    bridge.request("(skeleton: push-to-talk start)")
+                    bridge.ptt_start()
             }
             onReleased: {
                 if (typeof bridge !== "undefined")
-                    bridge.cancel()
+                    bridge.ptt_stop()
             }
         }
     }

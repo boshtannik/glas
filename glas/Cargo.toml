@@ -25,6 +25,7 @@ qmetaobject = { path = "vendor/qmetaobject-sfos-rs/qmetaobject" }
 sailors = { path = "vendor/sailors" }
 cpal = { version = "0.15", optional = true }
 hound = { version = "3", optional = true }
+libc = "0.2"
 
 [workspace]
 members = ["memory"]

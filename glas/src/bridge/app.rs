@@ -1,7 +1,12 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 
 use glas_memory::{now_secs, Memory, Source};
 use qmetaobject::*;
+
+use crate::settings::Settings;
+use crate::voice::{self, Recorder};
 
 /// Rust ↔ QML bridge.
 ///
@@ -24,19 +29,129 @@ pub struct AppBridge {
     #[allow(dead_code)]
     memory: RefCell<Memory>,
 
+    /// User settings (`~/.config/harbour-glas/settings.json`).
+    #[allow(dead_code)]
+    settings: Settings,
+
+    /// Push-to-talk recorder (parecord child process).
+    recorder: Recorder,
+
+    /// Result channel of the background transcription thread.
+    rx: Option<Receiver<Result<String, String>>>,
+
+    /// WAV file of the current/last recording.
+    wav: PathBuf,
+
     /// Liveness check for the bridge.
     ping: qt_method!(fn ping(&self) -> QString {
         QString::from("pong")
     }),
 
-    /// QML: send a text request (skeleton — logs only).
-    request: qt_method!(fn request(&self, text: QString) {
-        log::info!("bridge.request: {:?}", text.to_string());
+    /// QML: send a text request (skeleton — echoes the text).
+    request: qt_method!(fn request(&mut self, text: QString) {
+        let text = text.to_string();
+        log::info!("bridge.request: {text:?}");
+        self.answer = QString::from(text);
+        self.answer_changed();
     }),
 
-    /// QML: cancel the current processing.
-    cancel: qt_method!(fn cancel(&self) {
+    /// QML: cancel the current recording/processing.
+    cancel: qt_method!(fn cancel(&mut self) {
         log::info!("bridge.cancel");
+        let _ = self.recorder.stop();
+        self.rx = None;
+        self.set_status_rs("idle");
+    }),
+
+    /// QML: start push-to-talk recording.
+    ptt_start: qt_method!(fn ptt_start(&mut self) {
+        if self.recorder.is_recording() {
+            return;
+        }
+        let wav = std::env::temp_dir().join("glas-ptt.wav");
+        match self.recorder.start(&wav) {
+            Ok(()) => {
+                self.wav = wav;
+                self.answer = QString::from("");
+                self.answer_changed();
+                self.set_status_rs("recording");
+                log::info!("bridge.ptt_start");
+            }
+            Err(e) => {
+                self.answer = QString::from(format!("record error: {e}"));
+                self.answer_changed();
+                self.set_status_rs("error");
+                log::warn!("bridge.ptt_start failed: {e}");
+            }
+        }
+    }),
+
+    /// QML: stop recording and transcribe in the background.
+    ptt_stop: qt_method!(fn ptt_stop(&mut self) {
+        if !self.recorder.is_recording() {
+            return;
+        }
+        let _ = self.recorder.stop();
+        log::info!("bridge.ptt_stop");
+
+        let model = match voice::resolve_model(&self.settings.stt_model) {
+            Some(model) => model,
+            None => {
+                self.answer =
+                    QString::from("No speech model installed (Settings → Voice models)");
+                self.answer_changed();
+                self.set_status_rs("error");
+                return;
+            }
+        };
+
+        let wav = std::mem::take(&mut self.wav);
+        let lang = self.settings.language.clone();
+        let threads = self.settings.stt_threads.max(1);
+        let audio_ctx = voice::wav_audio_ctx(&wav);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let res = voice::transcribe(&model, &lang, threads, &wav, audio_ctx);
+            let _ = tx.send(res);
+        });
+        self.rx = Some(rx);
+        self.set_status_rs("processing");
+    }),
+
+    /// QML: poll the background transcription (call from a Timer).
+    poll: qt_method!(fn poll(&mut self) {
+        let msg = match self.rx.as_ref() {
+            Some(rx) => match rx.try_recv() {
+                Ok(res) => Some(res),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("worker stopped".to_string()))
+                }
+            },
+            None => None,
+        };
+        let res = match msg {
+            Some(res) => res,
+            None => return,
+        };
+        self.rx = None;
+        match res {
+            Ok(text) => {
+                let text = if text.is_empty() {
+                    "(no speech)".to_string()
+                } else {
+                    text
+                };
+                log::info!("bridge.poll: {text:?}");
+                self.answer = QString::from(text);
+            }
+            Err(e) => {
+                log::warn!("bridge.poll error: {e}");
+                self.answer = QString::from(format!("error: {e}"));
+            }
+        }
+        self.answer_changed();
+        self.set_status_rs("idle");
     }),
 
     /// QML: the profile as JSON (`{schema, facts:{key:{value,updated,source}}}`).

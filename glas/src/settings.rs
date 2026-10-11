@@ -23,6 +23,12 @@ pub struct Settings {
     /// Seconds of idleness after which models are unloaded from memory.
     #[serde(default = "default_idle_unload_secs")]
     pub idle_unload_secs: u64,
+    /// Absolute path to the whisper GGML model (empty = auto-detect).
+    #[serde(default)]
+    pub stt_model: String,
+    /// Threads passed to `whisper-cli`.
+    #[serde(default = "default_stt_threads")]
+    pub stt_threads: u32,
 }
 
 fn default_language() -> String {
@@ -40,6 +46,9 @@ fn default_tts_mode() -> String {
 fn default_idle_unload_secs() -> u64 {
     300
 }
+fn default_stt_threads() -> u32 {
+    4
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -49,6 +58,8 @@ impl Default for Settings {
             max_tokens: default_max_tokens(),
             tts_mode: default_tts_mode(),
             idle_unload_secs: default_idle_unload_secs(),
+            stt_model: String::new(),
+            stt_threads: default_stt_threads(),
         }
     }
 }

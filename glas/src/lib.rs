@@ -9,6 +9,7 @@
 pub mod bridge;
 pub mod cmd;
 pub mod settings;
+pub mod voice;
 
 pub use glas_memory as memory;
 
