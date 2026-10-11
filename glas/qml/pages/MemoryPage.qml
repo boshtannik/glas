@@ -7,8 +7,12 @@ Page {
     // Facts parsed from the Rust bridge (`{key, value}`), sorted by key.
     property var facts: []
 
+    // The memory bridge is only present in builds that include glas-memory.
+    readonly property bool memReady: (typeof bridge !== "undefined")
+                                     && (typeof bridge.memory_facts === "function")
+
     function reload() {
-        var raw = (typeof bridge !== "undefined") ? bridge.memory_facts() : "{}"
+        var raw = memReady ? bridge.memory_facts() : "{}"
         var obj = {}
         try {
             obj = JSON.parse(raw)
@@ -33,8 +37,11 @@ Page {
             note.text = qsTr("Both key and value are required.")
             return
         }
-        var err = (typeof bridge !== "undefined")
-                ? bridge.memory_set(key, value) : ""
+        if (!memReady) {
+            note.text = qsTr("Memory is unavailable in this build.")
+            return
+        }
+        var err = bridge.memory_set(key, value)
         if (err && err.length > 0) {
             note.text = err
         } else {
@@ -129,7 +136,7 @@ Page {
                         MenuItem {
                             text: qsTr("Forget")
                             onClicked: {
-                                if (typeof bridge !== "undefined")
+                                if (memoryPage.memReady)
                                     bridge.memory_forget(modelData.key)
                                 memoryPage.reload()
                             }
