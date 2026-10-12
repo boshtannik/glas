@@ -1,9 +1,39 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
+import QtMultimedia 5.4
 import "../components"
 
 Page {
     id: dialogPage
+
+    // True while the synthesized answer is being played back.
+    property bool speaking: false
+
+    // Playback is done here in QML (not in Rust): the worker only synthesizes
+    // the WAV and hands over its path (bridge.tts_file), exactly as the
+    // reference app does — so the audio thread never blocks the worker.
+    //
+    // NOTE: qmetaobject exposes names verbatim (snake_case), so the handler is
+    // `onTts_file_changed` and the property is `bridge.tts_file` (Qt only
+    // capitalises the first letter of the signal name).
+    MediaPlayer {
+        id: ttsPlayer
+        onPlaybackStateChanged: {
+            if (playbackState === MediaPlayer.StoppedState)
+                dialogPage.speaking = false
+        }
+    }
+
+    Connections {
+        target: (typeof bridge !== "undefined") ? bridge : null
+        onTts_file_changed: {
+            if (bridge.tts_file === "")
+                return
+            ttsPlayer.source = "file://" + bridge.tts_file
+            dialogPage.speaking = true
+            ttsPlayer.play()
+        }
+    }
 
     PageHeader {
         id: pageHeader
@@ -81,6 +111,34 @@ Page {
             bottom: parent.bottom
         }
         height: mic.height + Theme.paddingLarge
+
+        // Speak / stop the last answer (the worker synthesizes, we play).
+        IconButton {
+            id: speakButton
+            anchors {
+                right: mic.left
+                rightMargin: Theme.paddingLarge
+                verticalCenter: mic.verticalCenter
+            }
+            visible: (typeof bridge !== "undefined")
+                && bridge.answer !== ""
+                && bridge.status !== "recording"
+                && bridge.status !== "processing"
+            icon.source: dialogPage.speaking
+                ? "image://theme/icon-m-stop"
+                : "image://theme/icon-m-speaker"
+            onClicked: {
+                if (typeof bridge === "undefined")
+                    return
+                if (dialogPage.speaking) {
+                    dialogPage.speaking = false
+                    ttsPlayer.stop()
+                    bridge.tts_stop()
+                } else {
+                    bridge.tts_speak(bridge.answer)
+                }
+            }
+        }
 
         MicButton {
             id: mic

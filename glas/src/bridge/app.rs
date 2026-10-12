@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 
 use glas_memory::{now_secs, Memory, Source};
 use qmetaobject::*;
@@ -25,6 +27,14 @@ pub struct AppBridge {
     answer: qt_property!(QString; NOTIFY answer_changed),
     answer_changed: qt_signal!(),
 
+    /// WAV path of the last synthesized answer; the QML `MediaPlayer` plays it.
+    tts_file: qt_property!(QString; NOTIFY tts_file_changed),
+    tts_file_changed: qt_signal!(),
+
+    /// True while a synthesis runs in the background.
+    tts_busy: qt_property!(bool; NOTIFY tts_busy_changed),
+    tts_busy_changed: qt_signal!(),
+
     /// Long-term user preferences (`~/.local/share/harbour-glas/profile.json`).
     #[allow(dead_code)]
     memory: RefCell<Memory>,
@@ -38,6 +48,12 @@ pub struct AppBridge {
 
     /// Result channel of the background transcription thread.
     rx: Option<Receiver<Result<String, String>>>,
+
+    /// Result channel of the background TTS synthesis thread.
+    tts_rx: Option<Receiver<Result<String, String>>>,
+
+    /// Set by `tts_stop` to discard an in-flight synthesis.
+    tts_cancel: Arc<AtomicBool>,
 
     /// WAV file of the current/last recording.
     wav: PathBuf,
@@ -58,11 +74,17 @@ pub struct AppBridge {
         self.answer_changed();
     }),
 
-    /// QML: cancel the current recording/processing.
+    /// QML: cancel the current recording/processing/playback.
     cancel: qt_method!(fn cancel(&mut self) {
         log::info!("bridge.cancel");
         let _ = self.recorder.stop();
         self.rx = None;
+        self.tts_cancel.store(true, Ordering::SeqCst);
+        self.tts_rx = None;
+        if self.tts_busy {
+            self.tts_busy = false;
+            self.tts_busy_changed();
+        }
         self.set_status_rs("idle");
     }),
 
@@ -121,8 +143,71 @@ pub struct AppBridge {
         self.set_status_rs("processing");
     }),
 
+    /// QML: synthesize `text` and hand the WAV path to the QML `MediaPlayer`.
+    ///
+    /// Synthesis runs in the background (piper is a child process); the Rust
+    /// side never touches the audio device — playback is the UI's job, mirroring
+    /// the reference app.
+    tts_speak: qt_method!(fn tts_speak(&mut self, text: QString) {
+        let text = text.to_string();
+        if text.trim().is_empty() || self.tts_busy {
+            return;
+        }
+        log::info!("bridge.tts_speak ({} chars)", text.chars().count());
+        self.tts_cancel.store(false, Ordering::SeqCst);
+        let cancel = self.tts_cancel.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let res = voice::synthesize(&text, &cancel);
+            let _ = tx.send(res.map(|p| p.to_string_lossy().into_owned()));
+        });
+        self.tts_rx = Some(rx);
+        self.tts_busy = true;
+        self.tts_busy_changed();
+    }),
+
+    /// QML: stop playback and ask a running synthesis to be discarded.
+    tts_stop: qt_method!(fn tts_stop(&mut self) {
+        log::info!("bridge.tts_stop");
+        self.tts_cancel.store(true, Ordering::SeqCst);
+        self.tts_rx = None;
+        if self.tts_busy {
+            self.tts_busy = false;
+            self.tts_busy_changed();
+        }
+    }),
+
     /// QML: poll the background transcription (call from a Timer).
     poll: qt_method!(fn poll(&mut self) {
+        // TTS synthesis finished: surface the WAV path (or an error).
+        if let Some(rx) = self.tts_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(path)) => {
+                    self.tts_rx = None;
+                    self.tts_busy = false;
+                    self.tts_busy_changed();
+                    self.tts_file = QString::from(path);
+                    self.tts_file_changed();
+                }
+                Ok(Err(e)) => {
+                    self.tts_rx = None;
+                    self.tts_busy = false;
+                    self.tts_busy_changed();
+                    log::warn!("bridge.poll tts error: {e}");
+                    if e != "cancelled" {
+                        self.answer = QString::from(format!("tts: {e}"));
+                        self.answer_changed();
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.tts_rx = None;
+                    self.tts_busy = false;
+                    self.tts_busy_changed();
+                }
+            }
+        }
+
         let msg = match self.rx.as_ref() {
             Some(rx) => match rx.try_recv() {
                 Ok(res) => Some(res),

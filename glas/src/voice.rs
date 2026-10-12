@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 pub const WHISPER_BIN: &str = "/usr/libexec/harbour-glas/whisper-cli";
 /// PulseAudio source used for push-to-talk.
 pub const INPUT_SOURCE: &str = "source.primary_input";
+/// Bundled Piper (TTS) binary. Its home directory holds `espeak-ng-data`, so
+/// piper must run with `PIPER_HOME` as its working directory.
+pub const PIPER_HOME: &str = "/usr/libexec/harbour-glas/piper";
+pub const PIPER_BIN: &str = "/usr/libexec/harbour-glas/piper/piper";
 
 // ───────────────────────────── push-to-talk ─────────────────────────────
 
@@ -115,6 +119,236 @@ pub fn wav_audio_ctx(wav: &Path) -> u32 {
     let secs = samples as f64 / 16_000.0;
     let ctx = (secs * 50.0).ceil() as u32 + 50;
     ctx.clamp(100, 1500)
+}
+
+// ───────────────────────────── text-to-speech ─────────────────────────────
+
+/// Directory of the on-disk TTS cache (synthesized WAVs keyed by content).
+fn tts_cache_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/home/defaultuser"));
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cache"));
+    cache.join("harbour-glas").join("tts")
+}
+
+/// Stable cache path for a `(model, spoken)` pair, so replaying the same
+/// answer reuses the WAV instead of running piper again.
+fn tts_cache_path(model: &str, spoken: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    model.hash(&mut h);
+    0u8.hash(&mut h);
+    spoken.hash(&mut h);
+    tts_cache_dir().join(format!("{:016x}.wav", h.finish()))
+}
+
+/// Caps for the persistent TTS cache (LRU by mtime when exceeded).
+const MAX_TTS_FILES: usize = 200;
+const MAX_TTS_BYTES: u64 = 200 * 1024 * 1024; // 200 MB
+
+/// Trim the cache down to the caps above. The newest file (just written) is
+/// never evicted first.
+pub fn enforce_cache_limit() {
+    let dir = tts_cache_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    let mut total: u64 = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("wav") {
+            continue;
+        }
+        let Ok(md) = e.metadata() else { continue };
+        if !md.is_file() {
+            continue;
+        }
+        total += md.len();
+        files.push((md.modified().unwrap_or(std::time::UNIX_EPOCH), md.len(), p));
+    }
+    if files.len() <= MAX_TTS_FILES && total <= MAX_TTS_BYTES {
+        return;
+    }
+    files.sort_by_key(|(t, _, _)| *t); // oldest first
+    let mut count = files.len();
+    for (_, len, p) in files {
+        if count <= MAX_TTS_FILES && total <= MAX_TTS_BYTES {
+            break;
+        }
+        if std::fs::remove_file(&p).is_ok() {
+            total = total.saturating_sub(len);
+            count -= 1;
+        }
+    }
+}
+
+/// Remove inline markup: code spans, emphasis/strike markers, table pipes and
+/// link targets (`[text](url)` keeps `text`).
+fn clean_inline_tts(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '`' | '*' | '_' | '~' => {}
+            '|' => out.push(' '),
+            '[' | ']' => {}
+            '(' => {
+                for d in chars.by_ref() {
+                    if d == ')' {
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Turn markdown into plain prose for the speech engine: drop headings, lists,
+/// block quotes, code fences and horizontal rules.
+pub fn strip_markdown_for_tts(md: &str) -> String {
+    let mut out = String::new();
+    let mut in_fence = false;
+    for line in md.lines() {
+        let t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence || t.is_empty() {
+            continue;
+        }
+        if t.chars().all(|c| "-*_~".contains(c)) && t.chars().count() >= 3 {
+            continue;
+        }
+        let rest = t
+            .trim_start_matches(|c| c == '#' || c == '>' || c == '|')
+            .trim_start();
+        let rest = rest
+            .strip_prefix('-')
+            .or_else(|| rest.strip_prefix('*'))
+            .or_else(|| rest.strip_prefix('+'))
+            .map(|s| s.trim_start())
+            .unwrap_or(rest);
+        let rest = {
+            let bytes = rest.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i > 0 && i < bytes.len() && bytes[i] == b'.' {
+                rest[i + 1..].trim_start()
+            } else {
+                rest
+            }
+        };
+        let cleaned = clean_inline_tts(rest);
+        if !cleaned.is_empty() {
+            out.push_str(&cleaned);
+            out.push(' ');
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Synthesis voice selected in `voice_state.json` ("" if none).
+pub fn selected_tts() -> String {
+    std::fs::read_to_string(state_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<VoiceState>(&s).ok())
+        .map(|s| s.tts)
+        .unwrap_or_default()
+}
+
+/// Resolve the selected Piper voice: `(model.onnx, config.onnx.json)`.
+pub fn resolve_piper() -> Option<(PathBuf, PathBuf)> {
+    let id = selected_tts();
+    if id.is_empty() {
+        return None;
+    }
+    let dir = models_root().join(&id);
+    let mut onnx = None;
+    let mut json = None;
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name.ends_with(".onnx.json") {
+            json = Some(path);
+        } else if name.ends_with(".onnx") {
+            onnx = Some(path);
+        }
+    }
+    match (onnx, json) {
+        (Some(m), Some(c)) if m.is_file() && c.is_file() => Some((m, c)),
+        _ => None,
+    }
+}
+
+/// Synthesize `text` with the selected voice into the on-disk cache and return
+/// the WAV path.
+///
+/// The Rust process never touches the audio device: playback is done by the UI
+/// (QML `MediaPlayer`), exactly as in the reference app. `cancel` is polled
+/// after synthesis so a "stop" press discards the freshly written file.
+pub fn synthesize(text: &str, cancel: &AtomicBool) -> Result<PathBuf, String> {
+    let (model, config) = resolve_piper()
+        .ok_or_else(|| "No speech voice installed (Settings → Voice models)".to_string())?;
+    if !Path::new(PIPER_BIN).is_file() {
+        return Err(format!("piper not found at {PIPER_BIN}"));
+    }
+    let spoken = strip_markdown_for_tts(text);
+    if spoken.is_empty() {
+        return Err("empty text".into());
+    }
+    let id = selected_tts();
+    let dir = tts_cache_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let final_wav = tts_cache_path(&id, &spoken);
+    if final_wav.is_file() {
+        log::info!("tts: cache hit {}", final_wav.display());
+        return Ok(final_wav);
+    }
+
+    let out_wav = dir.join(format!(".tmp-{}.wav", std::process::id()));
+    let mut child = Command::new(PIPER_BIN)
+        .current_dir(PIPER_HOME)
+        .arg("-m")
+        .arg(&model)
+        .arg("-c")
+        .arg(&config)
+        .arg("-f")
+        .arg(&out_wav)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("piper: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write as _;
+        stdin
+            .write_all(spoken.as_bytes())
+            .map_err(|e| format!("piper stdin: {e}"))?;
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let err: String = String::from_utf8_lossy(&out.stderr)
+            .chars()
+            .take(200)
+            .collect();
+        return Err(format!("piper failed: {err}"));
+    }
+    if cancel.load(Ordering::SeqCst) {
+        log::info!("tts: cancelled, discarding file");
+        let _ = std::fs::remove_file(&out_wav);
+        return Err("cancelled".into());
+    }
+    std::fs::rename(&out_wav, &final_wav).map_err(|e| e.to_string())?;
+    enforce_cache_limit();
+    log::info!("tts: synthesized {}", final_wav.display());
+    Ok(final_wav)
 }
 
 // ───────────────────────────── model store ─────────────────────────────
