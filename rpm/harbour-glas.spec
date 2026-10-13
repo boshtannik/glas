@@ -79,7 +79,11 @@ install -Dm 755 third_party/whisper.cpp/main %{buildroot}%{_libexecdir}/%{name}/
 mkdir -p %{buildroot}%{_libexecdir}/%{name}/piper
 cp -a /home/mersdk/cargo-cache/piper-aarch64/piper/. %{buildroot}%{_libexecdir}/%{name}/piper/
 install -Dm 644 glas/assets/models.json -t %{buildroot}%{_datadir}/%{name}
-install -Dm 644 harbour-glas.png -t %{buildroot}%{_datadir}/icons/hicolor/86x86/apps
+# Launcher icons in all recommended sizes (Sailfish icon guidelines).
+for size in 86x86 108x108 128x128 172x172; do
+  install -Dm 644 icons/$size/harbour-glas.png \
+    %{buildroot}%{_datadir}/icons/hicolor/$size/apps/harbour-glas.png
+done
 install -Dm 644 harbour-glas.desktop -t %{buildroot}%{_datadir}/applications
 install -d %{buildroot}%{_datadir}/%{name}
 cp -r glas/qml %{buildroot}%{_datadir}/%{name}/qml
@@ -108,3 +112,6 @@ fi
 %{_datadir}/%{name}/models.json
 %{_datadir}/applications/%{name}.desktop
 %{_datadir}/icons/hicolor/86x86/apps/%{name}.png
+%{_datadir}/icons/hicolor/108x108/apps/%{name}.png
+%{_datadir}/icons/hicolor/128x128/apps/%{name}.png
+%{_datadir}/icons/hicolor/172x172/apps/%{name}.png
