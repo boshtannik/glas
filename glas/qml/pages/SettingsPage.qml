@@ -20,6 +20,7 @@ Page {
         model: [
             { title: qsTr("General"), page: "GeneralSettingsPage.qml" },
             { title: qsTr("Voice models"), page: "VoiceModelsPage.qml" },
+            { title: qsTr("Thinking models"), page: "ThinkingModelsPage.qml" },
             { title: qsTr("Skills"), page: "SkillsPage.qml" },
             { title: qsTr("Memory"), page: "MemoryPage.qml" }
         ]

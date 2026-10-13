@@ -15,3 +15,5 @@ pub use glas_memory as memory;
 
 #[cfg(feature = "voice")]
 pub mod audio;
+
+pub mod llm;

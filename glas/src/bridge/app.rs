@@ -7,6 +7,7 @@ use std::sync::Arc;
 use glas_memory::{now_secs, Memory, Source};
 use qmetaobject::*;
 
+use crate::llm::LlmStore;
 use crate::settings::Settings;
 use crate::voice::{self, Recorder, VoiceStore};
 
@@ -60,6 +61,9 @@ pub struct AppBridge {
 
     /// Shared voice-model catalog, selection and downloads.
     voice: VoiceStore,
+
+    /// Shared LLM (thinking) model catalog, selection and downloads.
+    llm: LlmStore,
 
     /// Liveness check for the bridge.
     ping: qt_method!(fn ping(&self) -> QString {
@@ -252,6 +256,18 @@ pub struct AppBridge {
         let cmd = cmd.to_string();
         let val = val.to_string();
         self.voice.command(&cmd, &val);
+    }),
+
+    /// QML: LLM (thinking) store snapshot (`{models, llm, lang, langs}`).
+    llm_status_json: qt_method!(fn llm_status_json(&mut self) -> QString {
+        QString::from(self.llm.status_json())
+    }),
+
+    /// QML: LLM store command (`llm_download`, `llm_select`, `llm_delete`, ...).
+    llm_command: qt_method!(fn llm_command(&mut self, cmd: QString, val: QString) {
+        let cmd = cmd.to_string();
+        let val = val.to_string();
+        self.llm.command(&cmd, &val);
     }),
 
     /// QML: the profile as JSON (`{schema, facts:{key:{value,updated,source}}}`).
