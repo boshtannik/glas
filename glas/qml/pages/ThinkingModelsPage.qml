@@ -1,17 +1,17 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 
-// Thinking (LLM) models: a search field, a language filter, a downloaded
-// section and the catalog. All selection/filtering/fit logic lives in Rust
-// (src/llm.rs); the QML only renders the snapshot and forwards commands.
-// Tapping a row opens the detail card (ModelCardPage.qml).
+// Thinking (LLM) models: a search field, a downloaded section and the live
+// Hugging Face catalog (paginated). All search/filtering/fit logic lives in
+// Rust (src/llm.rs); the QML only renders the snapshot and forwards commands.
+// Tapping a row opens the detail card (ModelCardPage.qml), which triggers the
+// lazy size/URL resolution.
 Page {
     id: llmPage
 
     // Snapshot of the bridge LLM store.
     property var dlModels: []       // downloaded (already filtered by Rust)
     property var catModels: []      // available catalog (already filtered)
-    property var langOptions: [ { id: "auto", name: qsTr("Auto") } ]
     property string chosenLlm: ""
     property string version: ""
     property string query: ""
@@ -21,8 +21,10 @@ Page {
     property string onDeviceHuman: ""
     property bool updating: false
     property string updateError: ""
+    property bool loadingMore: false
+    property bool hasMore: false
+    property string listError: ""
 
-    property string filterLang: "auto"
     property bool dlExpanded: true
     property bool llmExpanded: true
 
@@ -32,8 +34,8 @@ Page {
     readonly property string cmdDownloadCancel: "llm_download_cancel"
     readonly property string cmdDelete: "llm_delete"
     readonly property string cmdSearch: "llm_search"
-    readonly property string cmdFilterLang: "llm_filter_lang"
-    readonly property string cmdCatalogUpdate: "voice_catalog_update"
+    readonly property string cmdLoadMore: "llm_load_more"
+    readonly property string cmdCatalogUpdate: "llm_catalog_update"
     readonly property string stateDownloading: "downloading"
     readonly property string stateError: "error"
 
@@ -80,14 +82,9 @@ Page {
             llmPage.onDeviceHuman = od.human || ""
             llmPage.updating = !!vo.updating
             llmPage.updateError = vo.update_error || ""
-            if (vo.langs && vo.langs.length) {
-                var opts = [{ id: "auto", name: qsTr("Auto") }]
-                for (var i = 0; i < vo.langs.length; i++) {
-                    var L = vo.langs[i]
-                    opts.push({ id: L.id, name: L.name || L.id })
-                }
-                llmPage.langOptions = opts
-            }
+            llmPage.loadingMore = !!vo.loading_more
+            llmPage.hasMore = !!vo.has_more
+            llmPage.listError = vo.list_error || ""
         } catch (e) {
             console.log("llm parse error: " + e)
         }
@@ -110,20 +107,15 @@ Page {
                + "^" + llmPage.dlExpanded
     }
 
-    function filterIndex() {
-        var o = llmPage.langOptions || []
-        for (var i = 0; i < o.length; i++)
-            if (o[i].id === llmPage.filterLang)
-                return i
-        return 0
-    }
-
     function isSelected(m) {
         return m.model_id === llmPage.chosenLlm
     }
 
     function rowSub(m) {
-        var s = (m.lang_name || "") + " · " + (m.size_human || "")
+        var s = ""
+        if (m.params)
+            s += m.params + " · "
+        s += (m.approx ? "≈" : "") + (m.size_human || "")
         if (m.quant)
             s += " · " + m.quant
         if (m.state === llmPage.stateError)
@@ -273,7 +265,7 @@ Page {
 
         header: Item {
             width: parent.width
-            height: searchField.height + filterCombo.height
+            height: searchField.height
                     + summaryLabel.height + legendLabel.height
                     + (updateLabel.visible ? updateLabel.height + Theme.paddingSmall : 0)
                     + Theme.paddingMedium
@@ -288,31 +280,9 @@ Page {
                 }
             }
 
-            ComboBox {
-                id: filterCombo
-                anchors.top: searchField.bottom
-                width: parent.width
-                label: qsTr("Language")
-                currentIndex: llmPage.filterIndex()
-                menu: ContextMenu {
-                    Repeater {
-                        model: llmPage.langOptions
-                        MenuItem { text: modelData.name }
-                    }
-                }
-                onCurrentIndexChanged: {
-                    var o = llmPage.langOptions
-                    if (currentIndex < 0 || currentIndex >= o.length)
-                        return
-                    llmPage.filterLang = o[currentIndex].id
-                    llmPage.llmCmd(llmPage.cmdFilterLang, llmPage.filterLang)
-                    llmPage.refresh()
-                }
-            }
-
             Label {
                 id: summaryLabel
-                anchors.top: filterCombo.bottom
+                anchors.top: searchField.bottom
                 anchors.topMargin: Theme.paddingSmall
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
@@ -498,11 +468,61 @@ Page {
             }
         }
 
+        footer: Item {
+            width: list.width
+            height: footerCol.height + Theme.paddingLarge
+
+            Column {
+                id: footerCol
+                width: parent.width
+                spacing: Theme.paddingSmall
+
+                Label {
+                    visible: llmPage.listError !== ""
+                    x: Theme.horizontalPageMargin
+                    width: parent.width - 2 * Theme.horizontalPageMargin
+                    text: qsTr("Could not load more: %1").arg(llmPage.listError)
+                    color: "#e53935"
+                    font.pixelSize: Theme.fontSizeExtraSmall
+                    wrapMode: Text.Wrap
+                }
+
+                BusyIndicator {
+                    visible: llmPage.loadingMore
+                    running: llmPage.loadingMore
+                    size: BusyIndicatorSize.Small
+                    anchors.horizontalCenter: parent.horizontalCenter
+                }
+
+                Button {
+                    visible: llmPage.hasMore && !llmPage.loadingMore
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: qsTr("Load more")
+                    onClicked: {
+                        llmPage.llmCmd(llmPage.cmdLoadMore, "")
+                        llmPage.refresh()
+                    }
+                }
+
+                Label {
+                    visible: !llmPage.hasMore && !llmPage.loadingMore
+                             && llmPage.catModels.length > 0
+                    x: Theme.horizontalPageMargin
+                    width: parent.width - 2 * Theme.horizontalPageMargin
+                    horizontalAlignment: Text.AlignHCenter
+                    text: qsTr("End of catalog")
+                    color: Theme.secondaryColor
+                    font.pixelSize: Theme.fontSizeExtraSmall
+                }
+            }
+        }
+
         ViewPlaceholder {
             enabled: (llmPage.dlModels.length + llmPage.catModels.length) === 0
+                     && !llmPage.updating
             text: llmPage.query !== ""
                   ? qsTr("Nothing matches «%1»").arg(llmPage.query)
-                  : qsTr("No models in the catalog")
+                  : qsTr("No models — pull down to update")
         }
 
         PullDownMenu {

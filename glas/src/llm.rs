@@ -1,15 +1,26 @@
 //! LLM model store for thinking models.
 //!
-//! Provides model download/selection for GGUF LLM models (role `llm`).
+//! The catalog is browsed **live from the Hugging Face API**:
+//! - the list comes from paginated search results (`filter=gguf` +
+//!   `filter=text-generation`, newest download ranking) and is trimmed to the
+//!   device by parsing the parameter count out of the repo name (no extra
+//!   request);
+//! - the exact GGUF file, its real size and the download URL are resolved
+//!   lazily — with a single `?blobs=true` request per repo — only when the user
+//!   opens a card, then cached.
+//!
+//! Both are cached in Glas's own `llm_catalog.json` / `llm_meta.json`, kept
+//! apart from opencode's shared `catalog.json` (which holds STT/TTS).
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use reqwest::header::{HeaderMap, LINK};
 use serde::{Deserialize, Serialize};
-
 
 // ───────────────────────────── model store ─────────────────────────────
 
@@ -35,73 +46,52 @@ pub fn models_root() -> PathBuf {
     store_dir().join("models")
 }
 
+/// Glas's own LLM list cache (from the Hugging Face search).
 fn catalog_path() -> PathBuf {
-    store_dir().join("catalog.json")
-}
-
-/// Glas's own LLM catalog, kept apart from opencode's shared `catalog.json`
-/// (which holds STT/TTS) so neither app overwrites the other's entries.
-/// Written by the Hugging Face updater; takes precedence when present.
-fn llm_catalog_path() -> PathBuf {
     store_dir().join("llm_catalog.json")
 }
 
-/// Packaged catalog used as a fallback when the working copy is missing.
-fn packaged_catalog() -> PathBuf {
-    let oc = PathBuf::from("/usr/share/harbour-opencode/models.json");
-    if oc.is_file() {
-        oc
-    } else {
-        PathBuf::from("/usr/share/harbour-glas/models.json")
-    }
+/// Cache of the per-repo resolved GGUF file/size/URL, keyed by repo id.
+fn meta_path() -> PathBuf {
+    store_dir().join("llm_meta.json")
 }
 
 fn state_path() -> PathBuf {
     store_dir().join("voice_state.json")
 }
 
-/// A catalog entry (fields mirror `catalog.json`).
-#[derive(Debug, Clone, Deserialize)]
+/// One model in the browsing list. `size`/`quant`/`urls` live in the resolved
+/// cache ([`Detail`]); `est` is the name-derived size estimate used for the
+/// badge until the card is opened.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ModelEntry {
-    model_id: String,
+    #[serde(alias = "id")]
+    repo: String,
+    #[serde(default)]
     name: String,
-    #[serde(alias = "engine")]
     #[serde(default)]
-    engine: String,
-    #[serde(alias = "role")]
-    #[serde(default)]
-    role: String,
-    #[serde(default)]
-    lang_id: String,
-    #[serde(default)]
-    size: String,
-    #[serde(default, alias = "desc", alias = "summary")]
-    description: String,
-    #[serde(default, alias = "quantization", alias = "quant_type")]
-    quant: String,
-    #[serde(default, alias = "param_count", alias = "params_b")]
     params: String,
     #[serde(default)]
-    urls: Vec<String>,
+    downloads: u64,
+    /// Rough size estimate from the parsed parameter count (bytes).
     #[serde(default)]
-    hidden: bool,
+    est: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct Lang {
-    id: String,
-    #[serde(default)]
-    name: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Catalog {
     #[serde(default)]
     version: String,
     #[serde(default)]
-    langs: Vec<Lang>,
-    #[serde(default)]
     models: Vec<ModelEntry>,
+}
+
+/// Resolved facts about one repo: the GGUF file we'd download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Detail {
+    size: u64,
+    url: String,
+    quant: String,
 }
 
 /// Selection persisted next to the models (shared with opencode).
@@ -131,22 +121,35 @@ struct Download {
     targets: Vec<(PathBuf, PathBuf)>,
 }
 
+struct Page {
+    entries: Vec<ModelEntry>,
+    next: Option<String>,
+}
+
 /// Model catalog + selection + active downloads (LLM only).
 pub struct LlmStore {
     catalog: Catalog,
     state: VoiceState,
     downloads: Vec<Download>,
-    errors: std::collections::HashSet<String>,
-    /// Free-text search over name/id/quant/description (applied server-side).
+    errors: HashSet<String>,
+    /// Free-text search over repo name (applied server-side).
     query: String,
-    /// Language filter ("auto" = no filter).
-    filter_lang: String,
-    /// In-flight Hugging Face catalog update.
+    /// Cursor for the next page of search results (None = end reached).
+    next_cursor: Option<String>,
+    loading_more: bool,
+    list_error: String,
+    /// Page-1 refresh in flight.
     updating: bool,
-    /// Last catalog-update failure ("" when the last run succeeded).
     update_error: String,
-    /// Receives the result of the background catalog fetch.
-    update_rx: Option<mpsc::Receiver<Result<usize, String>>>,
+    /// `(append?, result)` of a list request.
+    list_rx: Option<mpsc::Receiver<(bool, Result<Page, String>)>>,
+    /// Repo whose `?blobs=true` detail is being fetched.
+    detail_repo: Option<String>,
+    detail_rx: Option<mpsc::Receiver<(String, Result<Detail, String>)>>,
+    /// Repos whose detail fetch failed (so we don't retry in a loop).
+    detail_failed: HashSet<String>,
+    /// Resolved per-repo details, keyed by repo id.
+    resolved: HashMap<String, Detail>,
 }
 
 impl Default for LlmStore {
@@ -156,7 +159,13 @@ impl Default for LlmStore {
 }
 
 fn file_name(url: &str) -> String {
-    url.rsplit('/').next().unwrap_or("").to_string()
+    url.split('?')
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn first_bin(dir: &Path) -> Option<PathBuf> {
@@ -177,6 +186,9 @@ const RUNTIME_OVERHEAD: u64 = 160 * 1024 * 1024;
 
 /// RAM we keep free so the system (and Glas itself) stays responsive.
 const RAM_RESERVE: u64 = 512 * 1024 * 1024;
+
+/// Rough bytes of GGUF weights per 1B parameters at Q4_K_M.
+const BYTES_PER_PARAM_Q4: f64 = 0.62e9;
 
 /// Free memory (`MemAvailable`) in bytes; 0 if unknown.
 ///
@@ -254,71 +266,75 @@ fn fit_for(size: u64, ram_avail: u64, disk_avail: u64) -> (&'static str, u64) {
     (fit, need)
 }
 
-// ───────────────────────── Hugging Face catalog ─────────────────────────
+// ───────────────────── name-based sizing (no requests) ─────────────────────
 
-/// A hand-picked Hugging Face repo surfaced as an LLM. The GGUF file and its
-/// exact size are resolved live (see [`fetch_llm_catalog`]); we only pin the
-/// repo id, a stable model id and the display metadata.
-struct HfRepo {
-    repo: &'static str,
-    id: &'static str,
-    name: &'static str,
-    lang: &'static str,
-    params: &'static str,
-    desc: &'static str,
+/// Parse the parameter count (in billions) out of a repo name.
+///
+/// Handles `7b`, `1.5B`, `360M`, and MoE tags like `30B-A3B` (takes the
+/// largest figure, i.e. the total parameter count).
+fn parse_params_b(name: &str) -> Option<f32> {
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    let mut best: Option<f32> = None;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            let mut dot = false;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || (bytes[i] == b'.' && !dot)) {
+                if bytes[i] == b'.' {
+                    dot = true;
+                }
+                i += 1;
+            }
+            let num = name[start..i].parse::<f32>().ok();
+            let suffix = bytes.get(i).copied();
+            let value = match (num, suffix) {
+                (Some(v), Some(b'b')) | (Some(v), Some(b'B')) => Some(v),
+                (Some(v), Some(b'm')) | (Some(v), Some(b'M')) => Some(v / 1000.0),
+                _ => None,
+            };
+            if let Some(v) = value {
+                best = Some(best.map_or(v, |b: f32| b.max(v)));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    best.filter(|b| *b > 0.0)
 }
 
-/// Curated GGUF candidates for llama.cpp. Kept deliberately small.
-const CURATED: &[HfRepo] = &[
-    HfRepo {
-        repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-        id: "qwen2.5-0.5b-instruct-q4_k_m",
-        name: "Qwen2.5 0.5B Instruct",
-        lang: "multilang",
-        params: "0.5B",
-        desc: "Самая лёгкая Qwen2.5 — быстрый оффлайн-черновик и короткие ответы.",
-    },
-    HfRepo {
-        repo: "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-        id: "qwen2.5-1.5b-instruct-q4_k_m",
-        name: "Qwen2.5 1.5B Instruct",
-        lang: "multilang",
-        params: "1.5B",
-        desc: "Баланс качества и размера; хороша для извлечения интентов.",
-    },
-    HfRepo {
-        repo: "Qwen/Qwen2.5-3B-Instruct-GGUF",
-        id: "qwen2.5-3b-instruct-q4_k_m",
-        name: "Qwen2.5 3B Instruct",
-        lang: "multilang",
-        params: "3B",
-        desc: "Заметно умнее, но тяжелее — на грани по памяти.",
-    },
-    HfRepo {
-        repo: "HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
-        id: "smollm2-360m-instruct-q8_0",
-        name: "SmolLM2 360M Instruct",
-        lang: "en",
-        params: "360M",
-        desc: "Крошечная англоязычная модель для самых слабых устройств.",
-    },
-    HfRepo {
-        repo: "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
-        id: "smollm2-1.7b-instruct-q4_k_m",
-        name: "SmolLM2 1.7B Instruct",
-        lang: "en",
-        params: "1.7B",
-        desc: "Крупнее 360M; только английский.",
-    },
-    HfRepo {
-        repo: "bartowski/gemma-2-2b-it-GGUF",
-        id: "gemma-2-2b-it-q4_k_m",
-        name: "Gemma 2 2B Instruct",
-        lang: "multilang",
-        params: "2B",
-        desc: "Google Gemma 2 — сильные многоязычные ответы.",
-    },
-];
+/// "1.5B" / "360M" from a count in billions.
+fn format_params(b: f32) -> String {
+    if b >= 1.0 {
+        if (b - b.round()).abs() < 0.05 {
+            format!("{}B", b.round() as u64)
+        } else {
+            format!("{b:.1}B")
+        }
+    } else {
+        format!("{}M", (b * 1000.0).round() as u64)
+    }
+}
+
+/// Name-derived Q4 size estimate (bytes) used for the pre-open badge.
+fn estimate_bytes(params_b: f32) -> u64 {
+    (params_b as f64 * BYTES_PER_PARAM_Q4) as u64
+}
+
+/// Largest parameter count (billions) we admit for the available RAM, with the
+/// same ~25% headroom the fit badge uses. Cheap and device-specific.
+fn max_params_b(ram_avail: u64) -> f32 {
+    if ram_avail == 0 {
+        return 8.0;
+    }
+    let usable = ram_avail.saturating_sub(RAM_RESERVE) as f64;
+    (usable / (BYTES_PER_PARAM_Q4 * 1.25)) as f32
+}
+
+// ───────────────────────── Hugging Face API ─────────────────────────
+
+const HF_API: &str = "https://huggingface.co/api/models";
+const PAGE_LIMIT: u32 = 30;
 
 /// GGUF quantization preference, best value first; matched case-insensitively
 /// as a substring of the file name.
@@ -326,7 +342,76 @@ const QUANT_PREF: &[&str] = &[
     "q4_k_m", "q4_k_s", "q4_0", "q5_k_m", "q3_k_m", "q8_0", "q6_k", "q2_k", "iq4_xs",
 ];
 
-/// Real file size, preferring the LFS entry (the plain `size` can be a pointer).
+fn http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent("harbour-glas/0.1")
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("http client: {e}"))
+}
+
+/// Cursor for the next page, from the `Link: …; rel="next"` header.
+fn parse_next_cursor(headers: &HeaderMap) -> Option<String> {
+    let link = headers.get(LINK)?.to_str().ok()?;
+    let start = link.find("cursor=")? + "cursor=".len();
+    let rest = &link[start..];
+    let end = rest
+        .find(|c| c == '>' || c == '&' || c == ',')
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(rest[..end].to_string())
+}
+
+/// One page of HF search results, trimmed to the device by parameter count.
+fn hf_search(cursor: Option<&str>, max_b: f32) -> Result<Page, String> {
+    let client = http_client()?;
+    let mut url = format!(
+        "{HF_API}?filter=gguf&filter=text-generation&sort=downloads&direction=-1&limit={PAGE_LIMIT}"
+    );
+    if let Some(c) = cursor {
+        url.push_str("&cursor=");
+        url.push_str(c);
+    }
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("запрос: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("HTTP: {e}"))?;
+    let next = parse_next_cursor(resp.headers());
+    let body = resp.text().map_err(|e| format!("чтение: {e}"))?;
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(&body).map_err(|e| format!("JSON: {e}"))?;
+
+    let mut entries = Vec::new();
+    for m in arr {
+        let repo = m
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if repo.is_empty() {
+            continue;
+        }
+        let params_b = parse_params_b(&repo);
+        if let Some(b) = params_b {
+            if b > max_b {
+                continue;
+            }
+        }
+        entries.push(ModelEntry {
+            name: repo.clone(),
+            repo,
+            params: params_b.map(format_params).unwrap_or_default(),
+            downloads: m.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0),
+            est: params_b.map(estimate_bytes).unwrap_or(0),
+        });
+    }
+    Ok(Page { entries, next })
+}
+
 fn hf_size(f: &serde_json::Value) -> u64 {
     f.get("lfs")
         .and_then(|l| l.get("size"))
@@ -335,117 +420,61 @@ fn hf_size(f: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// Pick the best GGUF in a repo tree: the first matching [`QUANT_PREF`] file
-/// (skipping split shards and projector helpers), else the smallest gguf.
-/// Returns `(size, path, quant_label)`.
-fn pick_gguf(files: &[serde_json::Value]) -> Option<(u64, String, String)> {
-    let candidates: Vec<(u64, String)> = files
+/// Pick the best GGUF from `(size, path)` candidates: the first matching
+/// [`QUANT_PREF`], else the smallest.
+fn pick_gguf(candidates: &[(u64, String)]) -> Option<(u64, String, String)> {
+    QUANT_PREF
         .iter()
-        .filter_map(|f| {
-            let path = f.get("path").and_then(|p| p.as_str())?;
-            let low = path.to_ascii_lowercase();
-            if !low.ends_with(".gguf") || low.contains("mmproj") || low.contains("-of-") {
-                return None;
-            }
-            Some((hf_size(f), path.to_string()))
+        .find_map(|want| {
+            candidates
+                .iter()
+                .find(|(_, path)| path.to_ascii_lowercase().contains(want))
+                .map(|(size, path)| (*size, path.clone(), want.to_ascii_uppercase()))
         })
-        .collect();
-    let hit = QUANT_PREF.iter().find_map(|want| {
-        candidates
-            .iter()
-            .find(|(_, path)| path.to_ascii_lowercase().contains(want))
-            .map(|(size, path)| (*size, path.clone(), want.to_ascii_uppercase()))
-    });
-    hit.or_else(|| {
-        candidates
-            .iter()
-            .min_by_key(|(size, _)| *size)
-            .map(|(size, path)| (*size, path.clone(), String::new()))
-    })
+        .or_else(|| {
+            candidates
+                .iter()
+                .min_by_key(|(size, _)| *size)
+                .map(|(size, path)| (*size, path.clone(), String::new()))
+        })
 }
 
-/// Resolve one curated repo to a catalog entry via the Hugging Face tree API.
-fn fetch_one(
-    client: &reqwest::blocking::Client,
-    spec: &HfRepo,
-) -> Result<serde_json::Value, String> {
-    let api = format!(
-        "https://huggingface.co/api/models/{}/tree/main?recursive=true",
-        spec.repo
-    );
+/// Resolve one repo to a concrete GGUF file via `?blobs=true` (one request).
+fn hf_detail(repo: &str) -> Result<Detail, String> {
+    let client = http_client()?;
+    let url = format!("https://huggingface.co/api/models/{repo}?blobs=true");
     let body = client
-        .get(&api)
+        .get(&url)
         .send()
         .map_err(|e| format!("запрос: {e}"))?
         .error_for_status()
         .map_err(|e| format!("HTTP: {e}"))?
         .text()
         .map_err(|e| format!("чтение: {e}"))?;
-    let files: Vec<serde_json::Value> =
+    let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("JSON: {e}"))?;
-    let (size, path, quant) = pick_gguf(&files).ok_or("в репозитории нет GGUF")?;
+    let candidates: Vec<(u64, String)> = v
+        .get("siblings")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| {
+                    let path = f.get("rfilename").and_then(|p| p.as_str())?;
+                    let low = path.to_ascii_lowercase();
+                    if !low.ends_with(".gguf") || low.contains("mmproj") || low.contains("-of-") {
+                        return None;
+                    }
+                    Some((hf_size(f), path.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let (size, path, quant) = pick_gguf(&candidates).ok_or("в репозитории нет GGUF")?;
     if size == 0 {
         return Err("нулевой размер файла".to_string());
     }
-    let url = format!(
-        "https://huggingface.co/{}/resolve/main/{}?download=true",
-        spec.repo, path
-    );
-    Ok(serde_json::json!({
-        "model_id": spec.id,
-        "name": spec.name,
-        "engine": "llm_llamacpp",
-        "role": "llm",
-        "lang_id": spec.lang,
-        "size": size.to_string(),
-        "description": spec.desc,
-        "quant": quant,
-        "params": spec.params,
-        "urls": [url],
-    }))
-}
-
-/// Query the Hugging Face API for every curated repo and write the resulting
-/// catalog to [`llm_catalog_path`]. Returns the number of models written.
-fn fetch_llm_catalog() -> Result<usize, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("harbour-glas/0.1")
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let mut models = Vec::new();
-    for spec in CURATED {
-        match fetch_one(&client, spec) {
-            Ok(v) => models.push(v),
-            Err(e) => log::warn!("llm: {}: {e}", spec.repo),
-        }
-    }
-    if models.is_empty() {
-        return Err("Hugging Face: ни одной модели не получено".to_string());
-    }
-    let count = models.len();
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let catalog = serde_json::json!({
-        "schema": 1,
-        "version": format!("hf-{secs}"),
-        "langs": [
-            { "id": "multilang", "name": "Multilingual" },
-            { "id": "en", "name": "English" },
-        ],
-        "models": models,
-    });
-    let dir = store_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("папка данных: {e}"))?;
-    let tmp = dir.join("llm_catalog.json.tmp");
-    let dest = llm_catalog_path();
-    std::fs::write(&tmp, serde_json::to_string_pretty(&catalog).unwrap_or_default())
-        .map_err(|e| format!("запись каталога: {e}"))?;
-    std::fs::rename(&tmp, &dest).map_err(|e| format!("сохранить каталог: {e}"))?;
-    log::info!("llm: HF catalog updated: {count} models -> {}", dest.display());
-    Ok(count)
+    let url = format!("https://huggingface.co/{repo}/resolve/main/{path}?download=true");
+    Ok(Detail { size, url, quant })
 }
 
 impl LlmStore {
@@ -454,27 +483,47 @@ impl LlmStore {
             catalog: Self::read_catalog(),
             state: Self::read_state(),
             downloads: Vec::new(),
-            errors: std::collections::HashSet::new(),
+            errors: HashSet::new(),
             query: String::new(),
-            filter_lang: "auto".to_string(),
+            next_cursor: None,
+            loading_more: false,
+            list_error: String::new(),
             updating: false,
             update_error: String::new(),
-            update_rx: None,
+            list_rx: None,
+            detail_repo: None,
+            detail_rx: None,
+            detail_failed: HashSet::new(),
+            resolved: Self::read_resolved(),
         };
-        // Default to the single installed STT model if nothing is chosen yet.
         store.validate_state();
         store
     }
 
     fn read_catalog() -> Catalog {
-        for path in [llm_catalog_path(), catalog_path(), packaged_catalog()] {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if let Ok(cat) = serde_json::from_str::<Catalog>(&text) {
-                    return cat;
-                }
-            }
-        }
-        Catalog::default()
+        std::fs::read_to_string(catalog_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_catalog(&self) -> std::io::Result<()> {
+        let dir = store_dir();
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(catalog_path(), serde_json::to_string(&self.catalog)?)
+    }
+
+    fn read_resolved() -> HashMap<String, Detail> {
+        std::fs::read_to_string(meta_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_resolved(&self) -> std::io::Result<()> {
+        let dir = store_dir();
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(meta_path(), serde_json::to_string(&self.resolved)?)
     }
 
     fn read_state() -> VoiceState {
@@ -492,10 +541,19 @@ impl LlmStore {
         std::fs::write(&path, serde_json::to_string(&self.state)?)
     }
 
-    fn is_llm(&self, m: &ModelEntry) -> bool {
-        let r = m.role.to_ascii_lowercase();
-        let e = m.engine.to_ascii_lowercase();
-        r == "llm" || e == "llm" || e.starts_with("llm")
+    fn model_dir(repo: &str) -> PathBuf {
+        models_root().join(repo)
+    }
+
+    fn is_downloaded(&self, repo: &str) -> bool {
+        match self.resolved.get(repo) {
+            Some(d) if !d.url.is_empty() => {
+                let dir = Self::model_dir(repo);
+                let name = file_name(&d.url);
+                !name.is_empty() && dir.join(name).is_file()
+            }
+            _ => false,
+        }
     }
 
     /// First downloaded LLM model ("" if none).
@@ -503,100 +561,142 @@ impl LlmStore {
         self.catalog
             .models
             .iter()
-            .find(|m| self.is_llm(m) && self.is_downloaded(m))
-            .map(|m| m.model_id.clone())
+            .find(|m| self.is_downloaded(&m.repo))
+            .map(|m| m.repo.clone())
             .unwrap_or_default()
     }
 
-    /// Re-index the disk and repair the selection: the chosen model may have
-    /// been removed by another app (the store is shared with opencode), so
-    /// fall back to whatever is actually present.
+    /// Repair the selection: the chosen model may have been removed by another
+    /// app (the store is shared with opencode).
     pub fn validate_state(&mut self) {
-        let llm_ok = !self.state.llm.is_empty()
-            && self
-                .catalog
-                .models
-                .iter()
-                .any(|m| m.model_id == self.state.llm && self.is_llm(m) && self.is_downloaded(m));
-        let mut changed = false;
-        if !llm_ok {
+        let ok = !self.state.llm.is_empty() && self.is_downloaded(&self.state.llm);
+        if !ok {
             let auto = self.auto_llm();
             if auto != self.state.llm {
                 self.state.llm = auto;
-                changed = true;
+                let _ = self.save_state();
             }
         }
-        if changed {
-            let _ = self.save_state();
-        }
     }
 
-    fn model_dir(&self, m: &ModelEntry) -> PathBuf {
-        models_root().join(&m.model_id)
-    }
+    // ── list pagination ────────────────────────────────────────────────
 
-    /// Kick off a Hugging Face catalog refresh in the background (idempotent).
-    fn start_catalog_update(&mut self) {
-        if self.updating {
+    /// Start a list request: page 1 (`append = false`) or the next page.
+    fn start_list(&mut self, append: bool) {
+        if self.updating || self.loading_more {
             return;
         }
-        self.updating = true;
-        self.update_error.clear();
+        let cursor = if append { self.next_cursor.clone() } else { None };
+        if append && cursor.is_none() {
+            return;
+        }
+        if append {
+            self.loading_more = true;
+        } else {
+            self.updating = true;
+            self.update_error.clear();
+        }
+        let max_b = max_params_b(mem_available_bytes());
         let (tx, rx) = mpsc::channel();
-        self.update_rx = Some(rx);
+        self.list_rx = Some(rx);
         std::thread::spawn(move || {
-            let res = fetch_llm_catalog();
-            let _ = tx.send(res);
+            let res = hf_search(cursor.as_deref(), max_b);
+            let _ = tx.send((append, res));
         });
     }
 
-    /// Non-blocking drain of the background catalog fetch.
-    fn poll_update(&mut self) {
-        let msg = match self.update_rx.as_ref() {
+    fn poll_list(&mut self) {
+        let msg = match self.list_rx.as_ref() {
             Some(rx) => match rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("worker stopped".to_string()))
+                    Some((false, Err("worker stopped".to_string())))
                 }
             },
             None => None,
         };
-        if let Some(res) = msg {
-            self.update_rx = None;
+        let Some((append, res)) = msg else { return };
+        self.list_rx = None;
+        if append {
+            self.loading_more = false;
+        } else {
             self.updating = false;
-            match res {
-                Ok(n) => {
-                    self.catalog = Self::read_catalog();
-                    self.update_error.clear();
-                    log::info!("llm: catalog reloaded from HF ({n} models)");
+        }
+        match res {
+            Ok(page) => {
+                self.next_cursor = page.next;
+                if append {
+                    let known: HashSet<String> =
+                        self.catalog.models.iter().map(|m| m.repo.clone()).collect();
+                    for e in page.entries {
+                        if !known.contains(&e.repo) {
+                            self.catalog.models.push(e);
+                        }
+                    }
+                } else {
+                    self.catalog.models = page.entries;
+                    self.catalog.version = format!("hf-{}", now_secs());
                 }
-                Err(e) => {
-                    log::warn!("llm: catalog update failed: {e}");
+                self.list_error.clear();
+                let _ = self.save_catalog();
+                log::info!("llm: list {} models", self.catalog.models.len());
+            }
+            Err(e) => {
+                log::warn!("llm: list failed: {e}");
+                if append {
+                    self.list_error = e;
+                } else {
                     self.update_error = e;
                 }
             }
         }
     }
 
-    fn is_downloaded(&self, m: &ModelEntry) -> bool {
-        if m.urls.is_empty() {
-            return false;
+    // ── lazy per-repo detail ───────────────────────────────────────────
+
+    fn start_detail(&mut self, repo: &str) {
+        if self.resolved.contains_key(repo)
+            || self.detail_failed.contains(repo)
+            || self.detail_repo.as_deref() == Some(repo)
+        {
+            return;
         }
-        let dir = self.model_dir(m);
-        m.urls.iter().all(|url| {
-            let name = file_name(url);
-            !name.is_empty() && dir.join(name).is_file()
-        })
+        self.detail_repo = Some(repo.to_string());
+        let (tx, rx) = mpsc::channel();
+        self.detail_rx = Some(rx);
+        let repo_s = repo.to_string();
+        std::thread::spawn(move || {
+            let res = hf_detail(&repo_s);
+            let _ = tx.send((repo_s, res));
+        });
     }
 
-    fn download_done(&self, d: &Download) -> u64 {
-        let mut done = 0;
-        for (final_path, part_path) in &d.targets {
-            done += std::fs::metadata(final_path).map(|m| m.len()).unwrap_or(0);
-            done += std::fs::metadata(part_path).map(|m| m.len()).unwrap_or(0);
+    fn poll_detail(&mut self) {
+        let msg = match self.detail_rx.as_ref() {
+            Some(rx) => match rx.try_recv() {
+                Ok(m) => Some(m),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some((String::new(), Err("worker stopped".to_string())))
+                }
+            },
+            None => None,
+        };
+        let Some((repo, res)) = msg else { return };
+        self.detail_rx = None;
+        self.detail_repo = None;
+        match res {
+            Ok(d) => {
+                log::info!("llm: resolved {repo} ({} {})", human_size(d.size), d.quant);
+                self.resolved.insert(repo, d);
+                let _ = self.save_resolved();
+            }
+            Err(e) => {
+                log::warn!("llm: detail {repo} failed: {e}");
+                self.detail_failed.insert(repo);
+            }
         }
-        done.min(d.total)
     }
 
     fn reap_finished(&mut self) {
@@ -618,11 +718,15 @@ impl LlmStore {
         }
     }
 
+    // ── snapshots ──────────────────────────────────────────────────────
+
     /// JSON consumed by the QML:
-    /// `{query, llm, lang, version, langs, device, downloaded[], catalog[]}`.
+    /// `{query, llm, version, updating, update_error, loading_more, has_more,
+    ///   list_error, device, on_device, downloaded[], catalog[]}`.
     pub fn status_json(&mut self) -> String {
         self.reap_finished();
-        self.poll_update();
+        self.poll_list();
+        self.poll_detail();
         self.validate_state();
 
         let ram_avail = mem_available_bytes();
@@ -631,11 +735,11 @@ impl LlmStore {
         let mut downloaded = Vec::new();
         let mut catalog = Vec::new();
         for m in &self.catalog.models {
-            if !self.is_llm(m) || !self.matches(m) {
+            if !self.matches(m) {
                 continue;
             }
             let obj = self.model_json(m, ram_avail, disk_avail);
-            if self.is_downloaded(m) {
+            if self.is_downloaded(&m.repo) {
                 downloaded.push(obj);
             } else {
                 catalog.push(obj);
@@ -645,21 +749,23 @@ impl LlmStore {
         let mut on_device_count = 0usize;
         let mut on_device_bytes = 0u64;
         for m in &self.catalog.models {
-            if self.is_llm(m) && self.is_downloaded(m) {
+            if self.is_downloaded(&m.repo) {
                 on_device_count += 1;
-                on_device_bytes =
-                    on_device_bytes.saturating_add(m.size.parse::<u64>().unwrap_or(0));
+                on_device_bytes = on_device_bytes.saturating_add(
+                    self.resolved.get(&m.repo).map(|d| d.size).unwrap_or(0),
+                );
             }
         }
 
         serde_json::json!({
             "query": self.query,
             "llm": self.state.llm,
-            "lang": self.state.lang,
             "version": self.catalog.version,
-            "langs": self.catalog.langs,
             "updating": self.updating,
             "update_error": self.update_error,
+            "loading_more": self.loading_more,
+            "has_more": self.next_cursor.is_some(),
+            "list_error": self.list_error,
             "device": {
                 "ram_available": ram_avail,
                 "ram_human": human_size(ram_avail),
@@ -678,83 +784,64 @@ impl LlmStore {
     }
 
     /// One model by id (ignores the search filter) — used by the detail card.
+    /// Triggers the lazy `?blobs=true` resolution on first open.
     pub fn model_json_by_id(&mut self, id: &str) -> String {
         self.reap_finished();
-        self.poll_update();
+        self.poll_detail();
         self.validate_state();
+        if !self.resolved.contains_key(id) {
+            self.start_detail(id);
+        }
         let ram_avail = mem_available_bytes();
         let disk_avail = disk_available_bytes(&store_dir());
-        let found = self
-            .catalog
-            .models
-            .iter()
-            .find(|m| m.model_id.as_str() == id && self.is_llm(m));
-        match found {
+        match self.catalog.models.iter().find(|m| m.repo == id) {
             Some(m) => self.model_json(m, ram_avail, disk_avail).to_string(),
             None => "{}".to_string(),
         }
     }
 
-    /// Query + language filter (moved out of QML on purpose).
+    /// Free-text search over the repo name (server-side; language filter gone).
     fn matches(&self, m: &ModelEntry) -> bool {
-        if !self.filter_lang.is_empty() && self.filter_lang != "auto" {
-            let l = m.lang_id.to_ascii_lowercase();
-            if l != "multilang" && l != "multilingual" && m.lang_id != self.filter_lang {
-                return false;
-            }
-        }
         if self.query.is_empty() {
             return true;
         }
         let q = self.query.to_lowercase();
-        m.name.to_lowercase().contains(q.as_str())
-            || m.model_id.to_lowercase().contains(q.as_str())
-            || m.quant.to_lowercase().contains(q.as_str())
-            || m.description.to_lowercase().contains(q.as_str())
-    }
-
-    fn lang_name(&self, id: &str) -> String {
-        if id == "multilang" || id == "multilingual" {
-            return "Multilingual".to_string();
-        }
-        for l in &self.catalog.langs {
-            if l.id == id {
-                return if l.name.is_empty() {
-                    l.id.clone()
-                } else {
-                    l.name.clone()
-                };
-            }
-        }
-        id.to_string()
+        m.repo.to_lowercase().contains(q.as_str())
+            || m.name.to_lowercase().contains(q.as_str())
+            || m.params.to_lowercase().contains(q.as_str())
     }
 
     /// One model as a display object (sizes, fit, state, human strings).
     fn model_json(&self, m: &ModelEntry, ram_avail: u64, disk_avail: u64) -> serde_json::Value {
-        let size = m.size.parse::<u64>().unwrap_or(0);
+        let detail = self.resolved.get(&m.repo);
+        let size = detail.map(|d| d.size).unwrap_or(m.est);
+        let approx = detail.is_none();
+        let quant = detail.map(|d| d.quant.clone()).unwrap_or_default();
         let (fit, need) = fit_for(size, ram_avail, disk_avail);
-        let downloading = self.downloads.iter().find(|d| d.model_id == m.model_id);
-        let downloaded = self.is_downloaded(m);
+        let downloading = self.downloads.iter().find(|d| d.model_id == m.repo);
+        let downloaded = self.is_downloaded(&m.repo);
+        let resolving =
+            self.detail_repo.as_deref() == Some(m.repo) && !self.resolved.contains_key(&m.repo);
         let state = if downloading.is_some() {
             "downloading"
-        } else if self.errors.contains(&m.model_id) {
+        } else if self.errors.contains(&m.repo) {
             "error"
         } else {
             ""
         };
         let done = downloading.map(|d| self.download_done(d)).unwrap_or(0);
         serde_json::json!({
-            "model_id": m.model_id,
+            "model_id": m.repo,
             "name": m.name,
-            "engine": if m.role.is_empty() { m.engine.clone() } else { m.role.clone() },
-            "lang_id": m.lang_id,
-            "lang_name": self.lang_name(&m.lang_id),
+            "params": m.params,
+            "downloads": m.downloads,
             "size": size,
             "size_human": human_size(size),
-            "quant": m.quant,
-            "params": m.params,
-            "description": m.description,
+            "approx": approx,
+            "quant": quant,
             "downloaded": downloaded,
+            "resolving": resolving,
+            "detail_error": self.detail_failed.contains(&m.repo),
             "state": state,
             "done": done,
             "done_human": human_size(done),
@@ -765,57 +852,62 @@ impl LlmStore {
         })
     }
 
+    fn download_done(&self, d: &Download) -> u64 {
+        let mut done = 0;
+        for (final_path, part_path) in &d.targets {
+            done += std::fs::metadata(final_path).map(|m| m.len()).unwrap_or(0);
+            done += std::fs::metadata(part_path).map(|m| m.len()).unwrap_or(0);
+        }
+        done.min(d.total)
+    }
+
     /// Handle a command from the QML.
     pub fn command(&mut self, cmd: &str, val: &str) {
         match cmd {
-            "voice_select_llm" | "llm_select" => {
+            "llm_select" => {
                 self.state.llm = val.to_string();
-                let _ = self.save_state();
-            }
-            "voice_lang" => {
-                self.state.lang = val.to_string();
                 let _ = self.save_state();
             }
             "llm_search" => {
                 self.query = val.to_string();
             }
-            "llm_filter_lang" => {
-                self.filter_lang = val.to_string();
-            }
-            "voice_download" | "llm_download" => self.start_download(val),
-            "voice_download_cancel" | "llm_download_cancel" => self.cancel_download(val),
-            "voice_delete" | "llm_delete" => self.delete_model(val),
-            "voice_catalog_update" | "llm_catalog_update" => self.start_catalog_update(),
+            "llm_load_more" => self.start_list(true),
+            "llm_catalog_update" => self.start_list(false),
+            "llm_download" => self.start_download(val),
+            "llm_download_cancel" => self.cancel_download(val),
+            "llm_delete" => self.delete_model(val),
             other => log::info!("llm_command ignored: {other}"),
         }
     }
 
-    fn start_download(&mut self, model_id: &str) {
-        if self.downloads.iter().any(|d| d.model_id == model_id) {
+    fn start_download(&mut self, repo: &str) {
+        if self.downloads.iter().any(|d| d.model_id == repo) {
             return;
         }
-        let model = match self.catalog.models.iter().find(|m| m.model_id == model_id) {
-            Some(m) => m.clone(),
-            None => return,
+        let detail = match self.resolved.get(repo) {
+            Some(d) if !d.url.is_empty() => d.clone(),
+            _ => {
+                log::warn!("llm: download {repo} without resolved detail");
+                return;
+            }
         };
-        let dir = self.model_dir(&model);
+        let dir = Self::model_dir(repo);
         let _ = std::fs::create_dir_all(&dir);
-        self.errors.remove(model_id);
-        log::info!("voice: downloading {model_id} ({} files)", model.urls.len());
+        self.errors.remove(repo);
+        let name = file_name(&detail.url);
+        if name.is_empty() {
+            return;
+        }
+        log::info!("llm: downloading {repo} -> {name}");
 
         let cancel = Arc::new(AtomicBool::new(false));
         let pid = Arc::new(AtomicI32::new(0));
         let finished = Arc::new(AtomicBool::new(false));
         let error = Arc::new(AtomicBool::new(false));
 
-        let mut jobs: Vec<(String, PathBuf, PathBuf)> = Vec::new();
-        for url in &model.urls {
-            let name = file_name(url);
-            if name.is_empty() {
-                continue;
-            }
-            jobs.push((url.clone(), dir.join(&name), dir.join(format!("{name}.part"))));
-        }
+        let final_path = dir.join(&name);
+        let part_path = dir.join(format!("{name}.part"));
+        let url = detail.url.clone();
 
         let (c, p, f, e) = (
             cancel.clone(),
@@ -823,63 +915,54 @@ impl LlmStore {
             finished.clone(),
             error.clone(),
         );
-        let thread_jobs = jobs.clone();
+        let (fp, pp) = (final_path.clone(), part_path.clone());
         std::thread::spawn(move || {
-            for (url, final_path, part_path) in thread_jobs {
-                if c.load(Ordering::SeqCst) {
-                    break;
-                }
-                let spawned = Command::new("curl")
-                    .arg("-L")
-                    .arg("--fail")
-                    .arg("--silent")
-                    .arg("--show-error")
-                    .arg("-o")
-                    .arg(&part_path)
-                    .arg(&url)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
-                match spawned {
-                    Ok(mut child) => {
-                        p.store(child.id() as i32, Ordering::SeqCst);
-                        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-                        p.store(0, Ordering::SeqCst);
-                        if c.load(Ordering::SeqCst) {
-                            let _ = std::fs::remove_file(&part_path);
-                            break;
-                        }
-                        if ok {
-                            let _ = std::fs::rename(&part_path, &final_path);
-                        } else {
-                            e.store(true, Ordering::SeqCst);
-                            let _ = std::fs::remove_file(&part_path);
-                            break;
-                        }
-                    }
-                    Err(_) => {
+            let spawned = Command::new("curl")
+                .arg("-L")
+                .arg("--fail")
+                .arg("--silent")
+                .arg("--show-error")
+                .arg("-o")
+                .arg(&pp)
+                .arg(&url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            match spawned {
+                Ok(mut child) => {
+                    p.store(child.id() as i32, Ordering::SeqCst);
+                    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+                    p.store(0, Ordering::SeqCst);
+                    if c.load(Ordering::SeqCst) {
+                        let _ = std::fs::remove_file(&pp);
+                    } else if ok {
+                        let _ = std::fs::rename(&pp, &fp);
+                    } else {
                         e.store(true, Ordering::SeqCst);
-                        break;
+                        let _ = std::fs::remove_file(&pp);
                     }
+                }
+                Err(_) => {
+                    e.store(true, Ordering::SeqCst);
                 }
             }
             f.store(true, Ordering::SeqCst);
         });
 
         self.downloads.push(Download {
-            model_id: model_id.to_string(),
-            total: model.size.parse().unwrap_or(0),
+            model_id: repo.to_string(),
+            total: detail.size,
             cancel,
             pid,
             finished,
             error,
-            targets: jobs.into_iter().map(|(_, a, b)| (a, b)).collect(),
+            targets: vec![(final_path, part_path)],
         });
     }
 
-    fn cancel_download(&mut self, model_id: &str) {
-        if let Some(d) = self.downloads.iter().find(|d| d.model_id == model_id) {
+    fn cancel_download(&mut self, repo: &str) {
+        if let Some(d) = self.downloads.iter().find(|d| d.model_id == repo) {
             d.cancel.store(true, Ordering::SeqCst);
             let pid = d.pid.load(Ordering::SeqCst);
             if pid > 0 {
@@ -888,20 +971,30 @@ impl LlmStore {
                 }
             }
         }
-        self.errors.remove(model_id);
+        self.errors.remove(repo);
     }
 
-    fn delete_model(&mut self, model_id: &str) {
-        self.cancel_download(model_id);
-        let dir = models_root().join(model_id);
+    fn delete_model(&mut self, repo: &str) {
+        self.cancel_download(repo);
+        let dir = Self::model_dir(repo);
         let _ = std::fs::remove_dir_all(&dir);
-        self.errors.remove(model_id);
-        if self.state.llm == model_id {
+        self.errors.remove(repo);
+        self.resolved.remove(repo);
+        self.detail_failed.remove(repo);
+        let _ = self.save_resolved();
+        if self.state.llm == repo {
             self.state.llm.clear();
         }
         let _ = self.save_state();
-        log::info!("voice: deleted {model_id}");
+        log::info!("llm: deleted {repo}");
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Resolve the whisper GGML model: explicit setting, the selection in
@@ -935,34 +1028,21 @@ pub fn resolve_model(setting: &str) -> Option<PathBuf> {
     }
     None
 }
-/// Resolve the selected GGUF LLM model (first .gguf/bin in the model dir).
+
+/// Resolve the selected GGUF LLM model (first `.gguf` in the model dir).
 pub fn resolve_llm() -> Option<PathBuf> {
     if let Ok(text) = std::fs::read_to_string(state_path()) {
         if let Ok(state) = serde_json::from_str::<VoiceState>(&text) {
             if !state.llm.is_empty() {
                 let dir = models_root().join(&state.llm);
-                for name in ["ggml-model.gguf", "model.gguf"] {
-                    let p = dir.join(name);
-                    if p.is_file() { return Some(p); }
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
+                            return Some(path);
+                        }
+                    }
                 }
-                if let Some(p) = first_bin(&dir) { return Some(p); }
-            }
-        }
-    }
-    let root = models_root();
-    if let Ok(entries) = std::fs::read_dir(&root) {
-        for entry in entries.flatten() {
-            let dir = entry.path();
-            if dir.is_dir() {
-                let id = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if let Ok(cat) = std::fs::read_to_string(catalog_path()) {
-                    let _ = cat;
-                }
-                for name in ["ggml-model.gguf", "model.gguf"] {
-                    let p = dir.join(name);
-                    if p.is_file() { return Some(p); }
-                }
-                if let Some(p) = first_bin(&dir) { return Some(p); }
             }
         }
     }

@@ -65,19 +65,19 @@ Page {
         return Theme.secondaryColor
     }
 
+    property bool resolving: (model && model.resolving) ? true : false
+    property bool detailError: (model && model.detail_error) ? true : false
+
     function detailRows() {
         var m = card.model || {}
         var rows = []
         if (m.size_human)
-            rows.push({ k: qsTr("Size"), v: m.size_human })
+            rows.push({ k: m.approx ? qsTr("Size (est.)") : qsTr("Size"),
+                        v: (m.approx ? "≈" : "") + m.size_human })
         if (m.quant)
             rows.push({ k: qsTr("Quantization"), v: m.quant })
         if (m.params)
             rows.push({ k: qsTr("Parameters"), v: m.params })
-        if (m.lang_name)
-            rows.push({ k: qsTr("Language"), v: m.lang_name })
-        if (m.engine)
-            rows.push({ k: qsTr("Engine"), v: m.engine })
         if (m.need_human)
             rows.push({ k: qsTr("Needs (est.)"), v: "~" + m.need_human })
         if (m.model_id)
@@ -94,6 +94,10 @@ Page {
         var m = card.model || {}
         if (m.state === "downloading")
             return qsTr("Cancel")
+        if (card.resolving)
+            return qsTr("Loading…")
+        if (card.detailError)
+            return qsTr("Unavailable")
         if (m.downloaded)
             return card.isSelected() ? qsTr("In use") : qsTr("Use this model")
         return qsTr("Download")
@@ -101,6 +105,8 @@ Page {
 
     function primaryEnabled() {
         var m = card.model || {}
+        if (card.resolving || card.detailError)
+            return false
         return !(m.downloaded && card.isSelected())
     }
 
@@ -169,6 +175,19 @@ Page {
                         anchors.verticalCenter: parent.verticalCenter
                     }
                 }
+            }
+
+            // ── lazy resolution status ───────────────────────────────────
+            Label {
+                visible: card.resolving || card.detailError
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                text: card.detailError
+                      ? qsTr("Could not read the file list from Hugging Face")
+                      : qsTr("Reading file list from Hugging Face…")
+                color: card.detailError ? "#e53935" : Theme.secondaryColor
+                font.pixelSize: Theme.fontSizeExtraSmall
+                wrapMode: Text.Wrap
             }
 
             // ── download progress ────────────────────────────────────────
