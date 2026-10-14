@@ -258,44 +258,38 @@ Page {
 
     RemorseItem { id: remorse }
 
-    // Debounced search: the query is sent to Hugging Face server-side.
-    Timer {
-        id: searchDebounce
-        interval: 350
-        repeat: false
-        onTriggered: {
-            llmPage.llmCmd(llmPage.cmdSearch, searchField.text)
-            llmPage.refresh()
-        }
-    }
-
-    // Kept outside the list: rebuilding the model must not steal focus and
-    // dismiss the keyboard.
-    SearchField {
-        id: searchField
-        width: parent.width
-        anchors.top: parent.top
-        placeholderText: qsTr("Search thinking models")
-        onTextChanged: searchDebounce.restart()
-    }
-
     SilicaListView {
         id: list
-        anchors.top: searchField.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
+        anchors.fill: parent
         model: llmModel
+        // Otherwise the current delegate steals focus from the SearchField
+        // whenever the model is rebuilt, dismissing the keyboard.
+        currentIndex: -1
 
         header: Item {
             width: parent.width
-            height: summaryLabel.height + legendLabel.height
+            height: searchField.height + summaryLabel.height + legendLabel.height
                     + (updateLabel.visible ? updateLabel.height + Theme.paddingSmall : 0)
                     + Theme.paddingMedium
 
+            SearchField {
+                id: searchField
+                width: parent.width
+                placeholderText: qsTr("Search thinking models")
+                onTextChanged: searchDebounce.restart()
+            }
+
+            // Debounced search: the query is sent to Hugging Face server-side.
+            Timer {
+                id: searchDebounce
+                interval: 350
+                repeat: false
+                onTriggered: llmPage.llmCmd(llmPage.cmdSearch, searchField.text)
+            }
+
             Label {
                 id: summaryLabel
-                anchors.top: parent.top
+                anchors.top: searchField.bottom
                 anchors.topMargin: Theme.paddingSmall
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
@@ -551,5 +545,15 @@ Page {
         VerticalScrollDecorator {}
     }
 
-    Component.onCompleted: llmPage.refresh()
+    onStatusChanged: {
+        if (status === PageStatus.Active) {
+            llmPage.llmCmd("llm_page_active", "")
+            llmPage.refresh()
+        }
+    }
+
+    Component.onCompleted: {
+        llmPage.llmCmd("llm_page_active", "")
+        llmPage.refresh()
+    }
 }

@@ -152,6 +152,11 @@ pub struct LlmStore {
     resolved: HashMap<String, Detail>,
     /// Model whose download should start as soon as its detail resolves.
     pending_download: Option<String>,
+    /// Cached device free memory/disk. Refreshed only when data arrives (new
+    /// list, resolved detail, finished download, page entered) — not on every
+    /// poll, so the fit badge isn't recomputed live.
+    ram_avail: u64,
+    disk_avail: u64,
 }
 
 impl Default for LlmStore {
@@ -517,7 +522,10 @@ impl LlmStore {
             detail_failed: HashSet::new(),
             resolved: Self::read_resolved(),
             pending_download: None,
+            ram_avail: 0,
+            disk_avail: 0,
         };
+        store.refresh_device();
         store.validate_state();
         store
     }
@@ -601,6 +609,12 @@ impl LlmStore {
             .collect();
         repos.sort();
         repos
+    }
+
+    /// Re-read free memory/disk. Called when new data arrives, not per poll.
+    fn refresh_device(&mut self) {
+        self.ram_avail = mem_available_bytes();
+        self.disk_avail = disk_available_bytes(&store_dir());
     }
 
     /// Repair the selection: the chosen model may have been removed by another
@@ -689,6 +703,7 @@ impl LlmStore {
                     self.catalog.version = format!("hf-{}", now_secs());
                 }
                 self.list_error.clear();
+                self.refresh_device();
                 let _ = self.save_catalog();
                 log::info!("llm: list {} models", self.catalog.models.len());
             }
@@ -740,6 +755,7 @@ impl LlmStore {
             Ok(d) => {
                 log::info!("llm: resolved {repo} ({} {})", human_size(d.size), d.quant);
                 self.resolved.insert(repo.clone(), d);
+                self.refresh_device();
                 let _ = self.save_resolved();
                 if self.pending_download.as_deref() == Some(repo.as_str()) {
                     self.pending_download = None;
@@ -770,6 +786,7 @@ impl LlmStore {
                 for (_, part_path) in &d.targets {
                     let _ = std::fs::remove_file(part_path);
                 }
+                self.refresh_device();
             } else {
                 i += 1;
             }
@@ -787,8 +804,7 @@ impl LlmStore {
         self.poll_detail();
         self.validate_state();
 
-        let ram_avail = mem_available_bytes();
-        let disk_avail = disk_available_bytes(&store_dir());
+        let (ram_avail, disk_avail) = (self.ram_avail, self.disk_avail);
 
         // Downloaded models are independent of the search: built from the
         // resolved cache so they never disappear when the list is replaced.
@@ -849,8 +865,7 @@ impl LlmStore {
         if !self.resolved.contains_key(id) {
             self.start_detail(id);
         }
-        let ram_avail = mem_available_bytes();
-        let disk_avail = disk_available_bytes(&store_dir());
+        let (ram_avail, disk_avail) = (self.ram_avail, self.disk_avail);
         if let Some(m) = self.catalog.models.iter().find(|m| m.repo == id) {
             return self.model_json(m, ram_avail, disk_avail).to_string();
         }
@@ -943,6 +958,7 @@ impl LlmStore {
                     self.start_list(false);
                 }
             }
+            "llm_page_active" => self.refresh_device(),
             "llm_load_more" => self.start_list(true),
             "llm_catalog_update" => self.start_list(false),
             "llm_download" => self.start_download(val),
