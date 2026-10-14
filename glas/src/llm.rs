@@ -141,8 +141,8 @@ pub struct LlmStore {
     /// Page-1 refresh in flight.
     updating: bool,
     update_error: String,
-    /// `(append?, result)` of a list request.
-    list_rx: Option<mpsc::Receiver<(bool, Result<Page, String>)>>,
+    /// `(append?, query, result)` of a list request.
+    list_rx: Option<mpsc::Receiver<(bool, String, Result<Page, String>)>>,
     /// Repo whose `?blobs=true` detail is being fetched.
     detail_repo: Option<String>,
     detail_rx: Option<mpsc::Receiver<(String, Result<Detail, String>)>>,
@@ -150,6 +150,8 @@ pub struct LlmStore {
     detail_failed: HashSet<String>,
     /// Resolved per-repo details, keyed by repo id.
     resolved: HashMap<String, Detail>,
+    /// Model whose download should start as soon as its detail resolves.
+    pending_download: Option<String>,
 }
 
 impl Default for LlmStore {
@@ -364,12 +366,31 @@ fn parse_next_cursor(headers: &HeaderMap) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Percent-encode a value for a URL query (unreserved chars kept verbatim).
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// One page of HF search results, trimmed to the device by parameter count.
-fn hf_search(cursor: Option<&str>, max_b: f32) -> Result<Page, String> {
+/// `query` is sent server-side as HF's `search` parameter (full text).
+fn hf_search(cursor: Option<&str>, max_b: f32, query: &str) -> Result<Page, String> {
     let client = http_client()?;
     let mut url = format!(
         "{HF_API}?filter=gguf&filter=text-generation&sort=downloads&direction=-1&limit={PAGE_LIMIT}"
     );
+    if !query.is_empty() {
+        url.push_str("&search=");
+        url.push_str(&pct_encode(query));
+    }
     if let Some(c) = cursor {
         url.push_str("&cursor=");
         url.push_str(c);
@@ -495,6 +516,7 @@ impl LlmStore {
             detail_rx: None,
             detail_failed: HashSet::new(),
             resolved: Self::read_resolved(),
+            pending_download: None,
         };
         store.validate_state();
         store
@@ -556,14 +578,29 @@ impl LlmStore {
         }
     }
 
-    /// First downloaded LLM model ("" if none).
+    /// First downloaded LLM model ("" if none). Downloaded models live in the
+    /// resolved cache, so they stay reachable even after the browsing list is
+    /// replaced by a new search.
     fn auto_llm(&self) -> String {
-        self.catalog
-            .models
-            .iter()
-            .find(|m| self.is_downloaded(&m.repo))
-            .map(|m| m.repo.clone())
+        let mut repos: Vec<&String> = self.resolved.keys().collect();
+        repos.sort();
+        repos
+            .into_iter()
+            .find(|r| self.is_downloaded(r))
+            .cloned()
             .unwrap_or_default()
+    }
+
+    /// Every downloaded model repo (regardless of the current search).
+    fn downloaded_repos(&self) -> Vec<String> {
+        let mut repos: Vec<String> = self
+            .resolved
+            .keys()
+            .filter(|r| self.is_downloaded(r))
+            .cloned()
+            .collect();
+        repos.sort();
+        repos
     }
 
     /// Repair the selection: the chosen model may have been removed by another
@@ -581,28 +618,39 @@ impl LlmStore {
 
     // ── list pagination ────────────────────────────────────────────────
 
-    /// Start a list request: page 1 (`append = false`) or the next page.
+    /// Start a list request: page 1 (`append = false`, replaces any in-flight
+    /// request — so a new query cancels stale results) or the next page.
     fn start_list(&mut self, append: bool) {
-        if self.updating || self.loading_more {
-            return;
-        }
-        let cursor = if append { self.next_cursor.clone() } else { None };
-        if append && cursor.is_none() {
-            return;
-        }
         if append {
+            if self.loading_more || self.updating {
+                return;
+            }
+            let Some(cursor) = self.next_cursor.clone() else {
+                return;
+            };
             self.loading_more = true;
+            let query = self.query.clone();
+            let max_b = max_params_b(mem_available_bytes());
+            let (tx, rx) = mpsc::channel();
+            self.list_rx = Some(rx);
+            std::thread::spawn(move || {
+                let res = hf_search(Some(&cursor), max_b, &query);
+                let _ = tx.send((true, query, res));
+            });
         } else {
             self.updating = true;
+            self.loading_more = false;
             self.update_error.clear();
+            self.next_cursor = None;
+            let query = self.query.clone();
+            let max_b = max_params_b(mem_available_bytes());
+            let (tx, rx) = mpsc::channel();
+            self.list_rx = Some(rx);
+            std::thread::spawn(move || {
+                let res = hf_search(None, max_b, &query);
+                let _ = tx.send((false, query, res));
+            });
         }
-        let max_b = max_params_b(mem_available_bytes());
-        let (tx, rx) = mpsc::channel();
-        self.list_rx = Some(rx);
-        std::thread::spawn(move || {
-            let res = hf_search(cursor.as_deref(), max_b);
-            let _ = tx.send((append, res));
-        });
     }
 
     fn poll_list(&mut self) {
@@ -611,12 +659,14 @@ impl LlmStore {
                 Ok(m) => Some(m),
                 Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    Some((false, Err("worker stopped".to_string())))
+                    Some((false, String::new(), Err("worker stopped".to_string())))
                 }
             },
             None => None,
         };
-        let Some((append, res)) = msg else { return };
+        let Some((append, _query, res)) = msg else {
+            return;
+        };
         self.list_rx = None;
         if append {
             self.loading_more = false;
@@ -689,11 +739,19 @@ impl LlmStore {
         match res {
             Ok(d) => {
                 log::info!("llm: resolved {repo} ({} {})", human_size(d.size), d.quant);
-                self.resolved.insert(repo, d);
+                self.resolved.insert(repo.clone(), d);
                 let _ = self.save_resolved();
+                if self.pending_download.as_deref() == Some(repo.as_str()) {
+                    self.pending_download = None;
+                    self.start_download(&repo);
+                }
             }
             Err(e) => {
                 log::warn!("llm: detail {repo} failed: {e}");
+                if self.pending_download.as_deref() == Some(repo.as_str()) {
+                    self.pending_download = None;
+                    self.errors.insert(repo.clone());
+                }
                 self.detail_failed.insert(repo);
             }
         }
@@ -732,30 +790,29 @@ impl LlmStore {
         let ram_avail = mem_available_bytes();
         let disk_avail = disk_available_bytes(&store_dir());
 
+        // Downloaded models are independent of the search: built from the
+        // resolved cache so they never disappear when the list is replaced.
         let mut downloaded = Vec::new();
-        let mut catalog = Vec::new();
-        for m in &self.catalog.models {
-            if !self.matches(m) {
-                continue;
-            }
-            let obj = self.model_json(m, ram_avail, disk_avail);
-            if self.is_downloaded(&m.repo) {
-                downloaded.push(obj);
-            } else {
-                catalog.push(obj);
-            }
-        }
-
         let mut on_device_count = 0usize;
         let mut on_device_bytes = 0u64;
-        for m in &self.catalog.models {
-            if self.is_downloaded(&m.repo) {
-                on_device_count += 1;
-                on_device_bytes = on_device_bytes.saturating_add(
-                    self.resolved.get(&m.repo).map(|d| d.size).unwrap_or(0),
-                );
-            }
+        for repo in self.downloaded_repos() {
+            let entry = self.entry_for(&repo);
+            downloaded.push(self.model_json(&entry, ram_avail, disk_avail));
+            on_device_count += 1;
+            on_device_bytes = on_device_bytes.saturating_add(
+                self.resolved.get(&repo).map(|d| d.size).unwrap_or(0),
+            );
         }
+
+        // Catalog: HF search results (already filtered server-side), minus the
+        // models shown in the downloaded section.
+        let catalog: Vec<serde_json::Value> = self
+            .catalog
+            .models
+            .iter()
+            .filter(|m| !self.is_downloaded(&m.repo))
+            .map(|m| self.model_json(m, ram_avail, disk_avail))
+            .collect();
 
         serde_json::json!({
             "query": self.query,
@@ -794,21 +851,33 @@ impl LlmStore {
         }
         let ram_avail = mem_available_bytes();
         let disk_avail = disk_available_bytes(&store_dir());
-        match self.catalog.models.iter().find(|m| m.repo == id) {
-            Some(m) => self.model_json(m, ram_avail, disk_avail).to_string(),
-            None => "{}".to_string(),
+        if let Some(m) = self.catalog.models.iter().find(|m| m.repo == id) {
+            return self.model_json(m, ram_avail, disk_avail).to_string();
         }
+        // Fall back to the resolved cache: downloaded / previously-opened models
+        // stay reachable even after the browsing list was replaced.
+        if self.resolved.contains_key(id) || self.downloads.iter().any(|d| d.model_id == id) {
+            let entry = self.entry_for(id);
+            return self.model_json(&entry, ram_avail, disk_avail).to_string();
+        }
+        "{}".to_string()
     }
 
-    /// Free-text search over the repo name (server-side; language filter gone).
-    fn matches(&self, m: &ModelEntry) -> bool {
-        if self.query.is_empty() {
-            return true;
+    /// A list entry for a repo, from the catalog when present, else synthesized
+    /// from the repo name + resolved size (for downloaded models no longer in
+    /// the current search results).
+    fn entry_for(&self, repo: &str) -> ModelEntry {
+        if let Some(m) = self.catalog.models.iter().find(|m| m.repo == repo) {
+            return m.clone();
         }
-        let q = self.query.to_lowercase();
-        m.repo.to_lowercase().contains(q.as_str())
-            || m.name.to_lowercase().contains(q.as_str())
-            || m.params.to_lowercase().contains(q.as_str())
+        let params_b = parse_params_b(repo);
+        ModelEntry {
+            repo: repo.to_string(),
+            name: repo.to_string(),
+            params: params_b.map(format_params).unwrap_or_default(),
+            downloads: 0,
+            est: self.resolved.get(repo).map(|d| d.size).unwrap_or(0),
+        }
     }
 
     /// One model as a display object (sizes, fit, state, human strings).
@@ -869,7 +938,10 @@ impl LlmStore {
                 let _ = self.save_state();
             }
             "llm_search" => {
-                self.query = val.to_string();
+                if self.query != val {
+                    self.query = val.to_string();
+                    self.start_list(false);
+                }
             }
             "llm_load_more" => self.start_list(true),
             "llm_catalog_update" => self.start_list(false),
@@ -887,7 +959,11 @@ impl LlmStore {
         let detail = match self.resolved.get(repo) {
             Some(d) if !d.url.is_empty() => d.clone(),
             _ => {
-                log::warn!("llm: download {repo} without resolved detail");
+                // Not resolved yet: fetch the file list, then download.
+                log::info!("llm: download {repo} — resolving first");
+                self.detail_failed.remove(repo);
+                self.pending_download = Some(repo.to_string());
+                self.start_detail(repo);
                 return;
             }
         };

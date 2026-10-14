@@ -258,31 +258,44 @@ Page {
 
     RemorseItem { id: remorse }
 
+    // Debounced search: the query is sent to Hugging Face server-side.
+    Timer {
+        id: searchDebounce
+        interval: 350
+        repeat: false
+        onTriggered: {
+            llmPage.llmCmd(llmPage.cmdSearch, searchField.text)
+            llmPage.refresh()
+        }
+    }
+
+    // Kept outside the list: rebuilding the model must not steal focus and
+    // dismiss the keyboard.
+    SearchField {
+        id: searchField
+        width: parent.width
+        anchors.top: parent.top
+        placeholderText: qsTr("Search thinking models")
+        onTextChanged: searchDebounce.restart()
+    }
+
     SilicaListView {
         id: list
-        anchors.fill: parent
+        anchors.top: searchField.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         model: llmModel
 
         header: Item {
             width: parent.width
-            height: searchField.height
-                    + summaryLabel.height + legendLabel.height
+            height: summaryLabel.height + legendLabel.height
                     + (updateLabel.visible ? updateLabel.height + Theme.paddingSmall : 0)
                     + Theme.paddingMedium
 
-            SearchField {
-                id: searchField
-                width: parent.width
-                placeholderText: qsTr("Search thinking models")
-                onTextChanged: {
-                    llmPage.llmCmd(llmPage.cmdSearch, text)
-                    llmPage.refresh()
-                }
-            }
-
             Label {
                 id: summaryLabel
-                anchors.top: searchField.bottom
+                anchors.top: parent.top
                 anchors.topMargin: Theme.paddingSmall
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
