@@ -69,7 +69,7 @@ test -x /home/mersdk/cargo-cache/piper-aarch64/piper/piper
 ls -l /home/mersdk/cargo-cache/piper-aarch64/piper
 
 # llama.cpp (LLM intents): a static llama-cli. Prepared by mbuild.sh (symlink).
-cd ../third_party/llama.cpp
+cd ../llama.cpp
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
