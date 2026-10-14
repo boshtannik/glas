@@ -87,10 +87,6 @@ Page {
         } catch (e) {
             console.log("llm parse error: " + e)
         }
-        // Restore the search box from Rust when the user is not typing.
-        if (searchField && !searchField.activeFocus
-                && searchField.text !== llmPage.query)
-            searchField.text = llmPage.query
     }
 
     function llmCmd(cmd, val) {
