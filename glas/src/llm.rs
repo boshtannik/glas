@@ -820,8 +820,8 @@ impl LlmStore {
         let (fit, need) = fit_for(size, ram_avail, disk_avail);
         let downloading = self.downloads.iter().find(|d| d.model_id == m.repo);
         let downloaded = self.is_downloaded(&m.repo);
-        let resolving =
-            self.detail_repo.as_deref() == Some(m.repo) && !self.resolved.contains_key(&m.repo);
+        let resolving = self.detail_repo.as_deref() == Some(m.repo.as_str())
+            && !self.resolved.contains_key(&m.repo);
         let state = if downloading.is_some() {
             "downloading"
         } else if self.errors.contains(&m.repo) {
