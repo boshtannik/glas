@@ -161,16 +161,22 @@ fn first_bin(dir: &Path) -> Option<PathBuf> {
 /// Startup/scratch overhead of the llama.cpp runtime (rough).
 const RUNTIME_OVERHEAD: u64 = 160 * 1024 * 1024;
 
-/// Available memory (`MemAvailable` + `SwapFree`) in bytes; 0 if unknown.
+/// RAM we keep free so the system (and Glas itself) stays responsive.
+const RAM_RESERVE: u64 = 512 * 1024 * 1024;
+
+/// Free memory (`MemAvailable`) in bytes; 0 if unknown.
+///
+/// Swap is deliberately NOT counted: on Sailfish it's zram (compressed RAM),
+/// so it holds no extra capacity — adding `SwapFree` would make a 5.3 GB phone
+/// look like it has ~5.6 GB free.
 fn mem_available_bytes() -> u64 {
     let mut avail = 0u64;
     if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
         for line in text.lines() {
             let mut it = line.split_whitespace();
-            let key = it.next().unwrap_or("");
-            if key == "MemAvailable:" || key == "SwapFree:" {
+            if it.next().unwrap_or("") == "MemAvailable:" {
                 if let Some(kb) = it.next().and_then(|v| v.parse::<u64>().ok()) {
-                    avail = avail.saturating_add(kb.saturating_mul(1024));
+                    avail = kb.saturating_mul(1024);
                 }
             }
         }
@@ -209,8 +215,9 @@ fn human_size(b: u64) -> String {
     format!("{} KB", b / 1024)
 }
 
-/// Estimate whether a model fits: `need` vs available RAM and disk.
-/// Returns `("green"|"yellow"|"red"|"", need_bytes)`.
+/// Estimate whether a model fits: `need` vs usable RAM and free disk.
+/// `usable RAM = MemAvailable - RAM_RESERVE`. Returns
+/// `("green"|"yellow"|"red"|"", need_bytes)`.
 fn fit_for(size: u64, ram_avail: u64, disk_avail: u64) -> (&'static str, u64) {
     if size == 0 {
         return ("", 0);
@@ -218,12 +225,13 @@ fn fit_for(size: u64, ram_avail: u64, disk_avail: u64) -> (&'static str, u64) {
     let need = size
         .saturating_add(size / 8)
         .saturating_add(RUNTIME_OVERHEAD);
-    let fits_ram = ram_avail == 0 || need <= ram_avail;
+    let usable = ram_avail.saturating_sub(RAM_RESERVE);
+    let fits_ram = ram_avail == 0 || need <= usable;
     let fits_disk = disk_avail == 0 || size <= disk_avail;
     let fit = if !fits_ram || !fits_disk {
         "red"
-    } else if (ram_avail > 0 && need.saturating_mul(10) > ram_avail.saturating_mul(6))
-        || (disk_avail > 0 && size.saturating_mul(10) > disk_avail.saturating_mul(6))
+    } else if (ram_avail > 0 && need.saturating_mul(10) > usable.saturating_mul(8))
+        || (disk_avail > 0 && size.saturating_mul(10) > disk_avail.saturating_mul(8))
     {
         "yellow"
     } else {
