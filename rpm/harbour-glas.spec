@@ -68,7 +68,18 @@ ls -l main
 test -x /home/mersdk/cargo-cache/piper-aarch64/piper/piper
 ls -l /home/mersdk/cargo-cache/piper-aarch64/piper
 
-# TODO(LLM stage): build llama.cpp (libllama + server/CLI) for the intent engine.
+# llama.cpp (LLM intents): a static llama-cli. Prepared by mbuild.sh (symlink).
+cd ../third_party/llama.cpp
+cmake -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DLLAMA_CURL=OFF \
+  -DLLAMA_BUILD_TESTS=OFF \
+  -DLLAMA_BUILD_SERVER=OFF \
+  -DGGML_NATIVE=OFF
+cmake --build build --target llama-cli -j4
+test -x build/bin/llama-cli
+ls -l build/bin/llama-cli
 
 # - INSTALL --------------------------------------------------------------------
 %install
@@ -76,6 +87,7 @@ MODE="${MBUILD_MODE:-debug}"
 rm -rf %{buildroot}
 install -Dm 755 /home/mersdk/cargo-cache/cargo/$MODE/aarch64-unknown-linux-gnu/$MODE/harbour-glas -t %{buildroot}%{_bindir}
 install -Dm 755 third_party/whisper.cpp/main %{buildroot}%{_libexecdir}/%{name}/whisper-cli
+install -Dm 755 third_party/llama.cpp/build/bin/llama-cli %{buildroot}%{_libexecdir}/%{name}/llama-cli
 mkdir -p %{buildroot}%{_libexecdir}/%{name}/piper
 cp -a /home/mersdk/cargo-cache/piper-aarch64/piper/. %{buildroot}%{_libexecdir}/%{name}/piper/
 install -Dm 644 glas/assets/models.json -t %{buildroot}%{_datadir}/%{name}
@@ -107,6 +119,7 @@ fi
 %defattr(-,root,root,-)
 %{_bindir}/harbour-glas
 %{_libexecdir}/%{name}/whisper-cli
+%{_libexecdir}/%{name}/llama-cli
 %{_libexecdir}/%{name}/piper
 %{_datadir}/%{name}/qml
 %{_datadir}/%{name}/models.json
