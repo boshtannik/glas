@@ -67,6 +67,12 @@ struct ModelEntry {
     lang_id: String,
     #[serde(default)]
     size: String,
+    #[serde(default, alias = "desc", alias = "summary")]
+    description: String,
+    #[serde(default, alias = "quantization", alias = "quant_type")]
+    quant: String,
+    #[serde(default, alias = "param_count", alias = "params_b")]
+    params: String,
     #[serde(default)]
     urls: Vec<String>,
     #[serde(default)]
@@ -123,6 +129,10 @@ pub struct LlmStore {
     state: VoiceState,
     downloads: Vec<Download>,
     errors: std::collections::HashSet<String>,
+    /// Free-text search over name/id/quant/description (applied server-side).
+    query: String,
+    /// Language filter ("auto" = no filter).
+    filter_lang: String,
 }
 
 impl Default for LlmStore {
@@ -146,6 +156,82 @@ fn first_bin(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+// ───────────────────────── device capability & fit ─────────────────────────
+
+/// Startup/scratch overhead of the llama.cpp runtime (rough).
+const RUNTIME_OVERHEAD: u64 = 160 * 1024 * 1024;
+
+/// Available memory (`MemAvailable` + `SwapFree`) in bytes; 0 if unknown.
+fn mem_available_bytes() -> u64 {
+    let mut avail = 0u64;
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            let key = it.next().unwrap_or("");
+            if key == "MemAvailable:" || key == "SwapFree:" {
+                if let Some(kb) = it.next().and_then(|v| v.parse::<u64>().ok()) {
+                    avail = avail.saturating_add(kb.saturating_mul(1024));
+                }
+            }
+        }
+    }
+    avail
+}
+
+/// Free bytes on the filesystem holding `path`; 0 if unknown.
+fn disk_available_bytes(path: &Path) -> u64 {
+    use std::os::unix::ffi::OsStrExt;
+    let mut c_path = path.as_os_str().as_bytes().to_vec();
+    c_path.push(0);
+    unsafe {
+        let mut st: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c_path.as_ptr() as *const libc::c_char, &mut st) == 0 {
+            (st.f_bavail as u64).saturating_mul(st.f_frsize as u64)
+        } else {
+            0
+        }
+    }
+}
+
+/// Human-readable size ("" for zero).
+fn human_size(b: u64) -> String {
+    if b == 0 {
+        return String::new();
+    }
+    let g = b as f64 / (1024.0 * 1024.0 * 1024.0);
+    if g >= 1.0 {
+        return format!("{g:.1} GB");
+    }
+    let m = b as f64 / (1024.0 * 1024.0);
+    if m >= 1.0 {
+        return format!("{} MB", m.round() as u64);
+    }
+    format!("{} KB", b / 1024)
+}
+
+/// Estimate whether a model fits: `need` vs available RAM and disk.
+/// Returns `("green"|"yellow"|"red"|"", need_bytes)`.
+fn fit_for(size: u64, ram_avail: u64, disk_avail: u64) -> (&'static str, u64) {
+    if size == 0 {
+        return ("", 0);
+    }
+    let need = size
+        .saturating_add(size / 8)
+        .saturating_add(RUNTIME_OVERHEAD);
+    let fits_ram = ram_avail == 0 || need <= ram_avail;
+    let fits_disk = disk_avail == 0 || size <= disk_avail;
+    let fit = if !fits_ram || !fits_disk {
+        "red"
+    } else if (ram_avail > 0 && need.saturating_mul(10) > ram_avail.saturating_mul(6))
+        || (disk_avail > 0 && size.saturating_mul(10) > disk_avail.saturating_mul(6))
+    {
+        "yellow"
+    } else {
+        "green"
+    };
+    (fit, need)
+}
+
 impl LlmStore {
     pub fn load() -> Self {
         let mut store = LlmStore {
@@ -153,6 +239,8 @@ impl LlmStore {
             state: Self::read_state(),
             downloads: Vec::new(),
             errors: std::collections::HashSet::new(),
+            query: String::new(),
+            filter_lang: "auto".to_string(),
         };
         // Default to the single installed STT model if nothing is chosen yet.
         store.validate_state();
@@ -267,45 +355,147 @@ impl LlmStore {
         }
     }
 
-    /// JSON consumed by the QML: `{models, llm, lang, langs}`.
+    /// JSON consumed by the QML:
+    /// `{query, llm, lang, version, langs, device, downloaded[], catalog[]}`.
     pub fn status_json(&mut self) -> String {
         self.reap_finished();
         self.validate_state();
-        let mut models = Vec::new();
+
+        let ram_avail = mem_available_bytes();
+        let disk_avail = disk_available_bytes(&store_dir());
+
+        let mut downloaded = Vec::new();
+        let mut catalog = Vec::new();
         for m in &self.catalog.models {
-            if !self.is_llm(m) {
+            if !self.is_llm(m) || !self.matches(m) {
                 continue;
             }
-            let downloading = self.downloads.iter().find(|d| d.model_id == m.model_id);
-            let downloaded = self.is_downloaded(m);
-            let state = if downloading.is_some() {
-                "downloading"
-            } else if self.errors.contains(&m.model_id) {
-                "error"
+            let obj = self.model_json(m, ram_avail, disk_avail);
+            if self.is_downloaded(m) {
+                downloaded.push(obj);
             } else {
-                ""
-            };
-            let done = downloading.map(|d| self.download_done(d)).unwrap_or(0);
-            models.push(serde_json::json!({
-                "model_id": m.model_id,
-                "name": m.name,
-                "size": m.size.parse::<u64>().unwrap_or(0),
-                "lang_id": m.lang_id,
-                "engine": if m.role.is_empty() { m.engine.clone() } else { m.role.clone() },
-                "downloaded": downloaded,
-                "state": state,
-                "done": done,
-                "hidden": m.hidden,
-            }));
+                catalog.push(obj);
+            }
         }
+
+        let mut on_device_count = 0usize;
+        let mut on_device_bytes = 0u64;
+        for m in &self.catalog.models {
+            if self.is_llm(m) && self.is_downloaded(m) {
+                on_device_count += 1;
+                on_device_bytes =
+                    on_device_bytes.saturating_add(m.size.parse::<u64>().unwrap_or(0));
+            }
+        }
+
         serde_json::json!({
-            "models": models,
+            "query": self.query,
             "llm": self.state.llm,
             "lang": self.state.lang,
-            "langs": self.catalog.langs,
             "version": self.catalog.version,
+            "langs": self.catalog.langs,
+            "device": {
+                "ram_available": ram_avail,
+                "ram_human": human_size(ram_avail),
+                "disk_available": disk_avail,
+                "disk_human": human_size(disk_avail),
+            },
+            "on_device": {
+                "count": on_device_count,
+                "bytes": on_device_bytes,
+                "human": human_size(on_device_bytes),
+            },
+            "downloaded": downloaded,
+            "catalog": catalog,
         })
         .to_string()
+    }
+
+    /// One model by id (ignores the search filter) — used by the detail card.
+    pub fn model_json_by_id(&mut self, id: &str) -> String {
+        self.reap_finished();
+        self.validate_state();
+        let ram_avail = mem_available_bytes();
+        let disk_avail = disk_available_bytes(&store_dir());
+        let found = self
+            .catalog
+            .models
+            .iter()
+            .find(|m| m.model_id.as_str() == id && self.is_llm(m));
+        match found {
+            Some(m) => self.model_json(m, ram_avail, disk_avail).to_string(),
+            None => "{}".to_string(),
+        }
+    }
+
+    /// Query + language filter (moved out of QML on purpose).
+    fn matches(&self, m: &ModelEntry) -> bool {
+        if !self.filter_lang.is_empty() && self.filter_lang != "auto" {
+            let l = m.lang_id.to_ascii_lowercase();
+            if l != "multilang" && l != "multilingual" && m.lang_id != self.filter_lang {
+                return false;
+            }
+        }
+        if self.query.is_empty() {
+            return true;
+        }
+        let q = self.query.to_lowercase();
+        m.name.to_lowercase().contains(q.as_str())
+            || m.model_id.to_lowercase().contains(q.as_str())
+            || m.quant.to_lowercase().contains(q.as_str())
+            || m.description.to_lowercase().contains(q.as_str())
+    }
+
+    fn lang_name(&self, id: &str) -> String {
+        if id == "multilang" || id == "multilingual" {
+            return "Multilingual".to_string();
+        }
+        for l in &self.catalog.langs {
+            if l.id == id {
+                return if l.name.is_empty() {
+                    l.id.clone()
+                } else {
+                    l.name.clone()
+                };
+            }
+        }
+        id.to_string()
+    }
+
+    /// One model as a display object (sizes, fit, state, human strings).
+    fn model_json(&self, m: &ModelEntry, ram_avail: u64, disk_avail: u64) -> serde_json::Value {
+        let size = m.size.parse::<u64>().unwrap_or(0);
+        let (fit, need) = fit_for(size, ram_avail, disk_avail);
+        let downloading = self.downloads.iter().find(|d| d.model_id == m.model_id);
+        let downloaded = self.is_downloaded(m);
+        let state = if downloading.is_some() {
+            "downloading"
+        } else if self.errors.contains(&m.model_id) {
+            "error"
+        } else {
+            ""
+        };
+        let done = downloading.map(|d| self.download_done(d)).unwrap_or(0);
+        serde_json::json!({
+            "model_id": m.model_id,
+            "name": m.name,
+            "engine": if m.role.is_empty() { m.engine.clone() } else { m.role.clone() },
+            "lang_id": m.lang_id,
+            "lang_name": self.lang_name(&m.lang_id),
+            "size": size,
+            "size_human": human_size(size),
+            "quant": m.quant,
+            "params": m.params,
+            "description": m.description,
+            "downloaded": downloaded,
+            "state": state,
+            "done": done,
+            "done_human": human_size(done),
+            "progress": if size > 0 { (done as f64 / size as f64).min(1.0) } else { 0.0 },
+            "fit": fit,
+            "need": need,
+            "need_human": human_size(need),
+        })
     }
 
     /// Handle a command from the QML.
@@ -318,6 +508,12 @@ impl LlmStore {
             "voice_lang" => {
                 self.state.lang = val.to_string();
                 let _ = self.save_state();
+            }
+            "llm_search" => {
+                self.query = val.to_string();
+            }
+            "llm_filter_lang" => {
+                self.filter_lang = val.to_string();
             }
             "voice_download" | "llm_download" => self.start_download(val),
             "voice_download_cancel" | "llm_download_cancel" => self.cancel_download(val),

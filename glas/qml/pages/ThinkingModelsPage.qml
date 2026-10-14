@@ -1,18 +1,24 @@
 import QtQuick 2.6
 import Sailfish.Silica 1.0
 
-// Thinking (LLM) model management (mirrors harbour-opencode): a downloaded
-// section plus the LLM catalog, a language filter, live progress, icon
-// actions and deletion with confirmation. Models are shared with opencode
-// through the same on-disk store.
+// Thinking (LLM) models: a search field, a language filter, a downloaded
+// section and the catalog. All selection/filtering/fit logic lives in Rust
+// (src/llm.rs); the QML only renders the snapshot and forwards commands.
+// Tapping a row opens the detail card (ModelCardPage.qml).
 Page {
     id: llmPage
 
     // Snapshot of the bridge LLM store.
-    property var llmModels: []
+    property var dlModels: []       // downloaded (already filtered by Rust)
+    property var catModels: []      // available catalog (already filtered)
     property var langOptions: [ { id: "auto", name: qsTr("Auto") } ]
     property string chosenLlm: ""
     property string version: ""
+    property string query: ""
+    property string ramHuman: ""
+    property string diskHuman: ""
+    property int onDeviceCount: 0
+    property string onDeviceHuman: ""
 
     property string filterLang: "auto"
     property bool dlExpanded: true
@@ -23,6 +29,8 @@ Page {
     readonly property string cmdDownload: "llm_download"
     readonly property string cmdDownloadCancel: "llm_download_cancel"
     readonly property string cmdDelete: "llm_delete"
+    readonly property string cmdSearch: "llm_search"
+    readonly property string cmdFilterLang: "llm_filter_lang"
     readonly property string cmdCatalogUpdate: "voice_catalog_update"
     readonly property string stateDownloading: "downloading"
     readonly property string stateError: "error"
@@ -30,9 +38,13 @@ Page {
     readonly property string secOndevice: "ondevice"
     readonly property string secLlm: "llm"
 
-    // Structural fingerprint (without the progress counter): the list is
-    // rebuilt only when selection/state/filter/sections change, not on every
-    // 400 ms poll — so scrolling is not reset during a download.
+    // Short labels for the fit badge (display-only; the value comes from Rust).
+    readonly property string fitGreen: "green"
+    readonly property string fitYellow: "yellow"
+    readonly property string fitRed: "red"
+
+    // Structural fingerprint: the list is rebuilt only when membership/state/
+    // selection/sections change, not on every 400 ms poll.
     property string llmFp: fingerprint()
     onLlmFpChanged: fillModel()
 
@@ -53,9 +65,17 @@ Page {
             return
         try {
             var vo = JSON.parse(s)
-            llmPage.llmModels = vo.models || []
+            llmPage.dlModels = vo.downloaded || []
+            llmPage.catModels = vo.catalog || []
             llmPage.chosenLlm = vo.llm || ""
             llmPage.version = vo.version || ""
+            llmPage.query = vo.query || ""
+            var dev = vo.device || {}
+            llmPage.ramHuman = dev.ram_human || ""
+            llmPage.diskHuman = dev.disk_human || ""
+            var od = vo.on_device || {}
+            llmPage.onDeviceCount = od.count ? od.count : 0
+            llmPage.onDeviceHuman = od.human || ""
             if (vo.langs && vo.langs.length) {
                 var opts = [{ id: "auto", name: qsTr("Auto") }]
                 for (var i = 0; i < vo.langs.length; i++) {
@@ -67,6 +87,10 @@ Page {
         } catch (e) {
             console.log("llm parse error: " + e)
         }
+        // Restore the search box from Rust when the user is not typing.
+        if (searchField && !searchField.activeFocus
+                && searchField.text !== llmPage.query)
+            searchField.text = llmPage.query
     }
 
     function llmCmd(cmd, val) {
@@ -75,23 +99,15 @@ Page {
     }
 
     function fingerprint() {
-        var arr = llmPage.llmModels || []
         var out = ""
-        for (var i = 0; i < arr.length; i++)
-            out += arr[i].model_id + "|" + (arr[i].downloaded ? 1 : 0) + "|"
-                   + arr[i].state + ";"
-        return out + "@" + llmPage.chosenLlm + "$" + llmPage.filterLang
-               + "%" + llmPage.llmExpanded + "^" + llmPage.dlExpanded
-    }
-
-    function langName(id) {
-        if (id === "multilang" || id === "multilingual")
-            return qsTr("Multilingual")
-        var o = llmPage.langOptions || []
-        for (var i = 0; i < o.length; i++)
-            if (o[i].id === id)
-                return o[i].name || id
-        return id
+        var a = llmPage.dlModels || []
+        for (var i = 0; i < a.length; i++)
+            out += a[i].model_id + "|" + a[i].state + ";"
+        var b = llmPage.catModels || []
+        for (var j = 0; j < b.length; j++)
+            out += b[j].model_id + "|" + b[j].state + ";"
+        return out + "@" + llmPage.chosenLlm + "%" + llmPage.llmExpanded
+               + "^" + llmPage.dlExpanded
     }
 
     function filterIndex() {
@@ -102,20 +118,14 @@ Page {
         return 0
     }
 
-    function visible(m) {
-        if (llmPage.filterLang === "" || llmPage.filterLang === "auto")
-            return true
-        if (m.lang_id === "multilang" || m.lang_id === "multilingual")
-            return true
-        return m.lang_id === llmPage.filterLang
-    }
-
     function isSelected(m) {
         return m.model_id === llmPage.chosenLlm
     }
 
     function rowSub(m) {
-        var s = llmPage.langName(m.lang_id) + " · " + llmPage.humanSize(m.size)
+        var s = (m.lang_name || "") + " · " + (m.size_human || "")
+        if (m.quant)
+            s += " · " + m.quant
         if (m.state === llmPage.stateError)
             s += " · " + qsTr("download failed")
         else if (m.downloaded)
@@ -143,11 +153,25 @@ Page {
         return Theme.primaryColor
     }
 
+    function fitColor(f) {
+        if (f === llmPage.fitGreen)
+            return "#4caf50"
+        if (f === llmPage.fitYellow)
+            return "#ffb300"
+        if (f === llmPage.fitRed)
+            return "#e53935"
+        return "transparent"
+    }
+
     function findModel(id) {
-        var arr = llmPage.llmModels || []
-        for (var i = 0; i < arr.length; i++)
-            if (arr[i].model_id === id)
-                return arr[i]
+        var a = llmPage.dlModels || []
+        for (var i = 0; i < a.length; i++)
+            if (a[i].model_id === id)
+                return a[i]
+        var b = llmPage.catModels || []
+        for (var j = 0; j < b.length; j++)
+            if (b[j].model_id === id)
+                return b[j]
         return null
     }
 
@@ -155,73 +179,46 @@ Page {
         var m = llmPage.findModel(id)
         if (!m || m.state !== llmPage.stateDownloading)
             return ""
-        var size = parseInt(m.size), done = parseInt(m.done || 0)
-        if (!size)
-            return ""
-        var pct = Math.min(99, Math.round(done / size * 100))
+        var pct = Math.min(99, Math.round((m.progress || 0) * 100))
         return qsTr("Downloading… %1% (%2 / %3)")
-               .arg(pct)
-               .arg(llmPage.humanSize(done))
-               .arg(llmPage.humanSize(size))
+               .arg(pct).arg(m.done_human || "").arg(m.size_human || "")
     }
 
     function liveRatio(id) {
         var m = llmPage.findModel(id)
         if (!m || m.state !== llmPage.stateDownloading)
             return 0
-        var size = parseInt(m.size), done = parseInt(m.done || 0)
-        if (!size)
-            return 0
-        return Math.max(0, Math.min(1, done / size))
+        return m.progress || 0
     }
 
     function fillModel() {
         llmModel.clear()
-        var arr = llmPage.llmModels || []
 
-        var ondev = llmPage.downloadedArr(arr)
+        var dl = llmPage.dlModels || []
         llmModel.append({ isHeader: true, kind: llmPage.secOndevice,
-                          title: qsTr("Downloaded models"),
-                          total: ondev.length, done: ondev.length,
+                          title: qsTr("Downloaded models"), count: dl.length,
                           name: "", sub: "", dlstate: "", modelId: "",
-                          downloaded: false })
+                          fit: "", downloaded: false })
         if (llmPage.dlExpanded)
-            for (var i = 0; i < ondev.length; i++)
-                llmPage.appendRow(ondev[i])
+            for (var i = 0; i < dl.length; i++)
+                llmPage.appendRow(dl[i])
 
-        var n = 0
-        for (var j = 0; j < arr.length; j++)
-            if (!arr[j].downloaded && llmPage.visible(arr[j]))
-                n++
+        var ct = llmPage.catModels || []
         llmModel.append({ isHeader: true, kind: llmPage.secLlm,
-                          title: qsTr("Thinking models"),
-                          total: n, done: n,
+                          title: qsTr("Thinking models"), count: ct.length,
                           name: "", sub: "", dlstate: "", modelId: "",
-                          downloaded: false })
+                          fit: "", downloaded: false })
         if (llmPage.llmExpanded)
-            for (var k = 0; k < arr.length; k++)
-                if (!arr[k].downloaded && llmPage.visible(arr[k]))
-                    llmPage.appendRow(arr[k])
-    }
-
-    function downloadedArr(arr) {
-        var out = []
-        for (var i = 0; i < arr.length; i++) {
-            if (!arr[i].downloaded)
-                continue
-            var d = {}
-            for (var k in arr[i])
-                d[k] = arr[i][k]
-            out.push(d)
-        }
-        return out
+            for (var j = 0; j < ct.length; j++)
+                llmPage.appendRow(ct[j])
     }
 
     function appendRow(m) {
-        llmModel.append({ isHeader: false, kind: "", total: 0, done: 0,
+        llmModel.append({ isHeader: false, kind: "",
+                          title: "", count: 0,
                           name: m.name, sub: llmPage.rowSub(m),
                           dlstate: m.state, modelId: m.model_id,
-                          downloaded: !!m.downloaded })
+                          fit: m.fit, downloaded: !!m.downloaded })
     }
 
     function toggleSection(kind) {
@@ -231,17 +228,25 @@ Page {
             llmPage.dlExpanded = !llmPage.dlExpanded
     }
 
-    function onRowTap(isHeader, kind, modelId, dlstate, downloaded) {
-        if (isHeader) {
-            llmPage.toggleSection(kind)
-            return
-        }
+    function openCard(modelId) {
+        pageStack.push(Qt.resolvedUrl("ModelCardPage.qml"), { modelId: modelId })
+    }
+
+    function quickAction(modelId, dlstate, downloaded) {
         if (dlstate === llmPage.stateDownloading)
             llmPage.llmCmd(llmPage.cmdDownloadCancel, modelId)
         else if (downloaded)
             llmPage.llmCmd(llmPage.cmdSelect, modelId)
         else
             llmPage.llmCmd(llmPage.cmdDownload, modelId)
+    }
+
+    function onRowTap(isHeader, kind, modelId) {
+        if (isHeader) {
+            llmPage.toggleSection(kind)
+            return
+        }
+        llmPage.openCard(modelId)
     }
 
     function onRowMenu(isHeader, kind, modelId, dlstate, downloaded, name, wdg) {
@@ -259,36 +264,6 @@ Page {
             llmPage.llmCmd(llmPage.cmdDownload, modelId)
     }
 
-    function humanSize(b) {
-        if (!b || b <= 0)
-            return ""
-        var g = b / (1024 * 1024 * 1024)
-        if (g >= 1)
-            return g.toFixed(1) + " GB"
-        var m = b / (1024 * 1024)
-        if (m >= 1)
-            return Math.round(m) + " MB"
-        return Math.round(b / 1024) + " KB"
-    }
-
-    function downloadedCount() {
-        var arr = llmPage.llmModels || []
-        var c = 0
-        for (var i = 0; i < arr.length; i++)
-            if (arr[i].downloaded)
-                c++
-        return c
-    }
-
-    function downloadedBytes() {
-        var arr = llmPage.llmModels || []
-        var b = 0
-        for (var i = 0; i < arr.length; i++)
-            if (arr[i].downloaded)
-                b += parseInt(arr[i].size || 0)
-        return b
-    }
-
     RemorseItem { id: remorse }
 
     SilicaListView {
@@ -298,10 +273,23 @@ Page {
 
         header: Item {
             width: parent.width
-            height: filterCombo.height + summaryLabel.height + Theme.paddingMedium
+            height: searchField.height + filterCombo.height
+                    + summaryLabel.height + legendLabel.height
+                    + Theme.paddingMedium
+
+            SearchField {
+                id: searchField
+                width: parent.width
+                placeholderText: qsTr("Search thinking models")
+                onTextChanged: {
+                    llmPage.llmCmd(llmPage.cmdSearch, text)
+                    llmPage.refresh()
+                }
+            }
 
             ComboBox {
                 id: filterCombo
+                anchors.top: searchField.bottom
                 width: parent.width
                 label: qsTr("Language")
                 currentIndex: llmPage.filterIndex()
@@ -316,6 +304,8 @@ Page {
                     if (currentIndex < 0 || currentIndex >= o.length)
                         return
                     llmPage.filterLang = o[currentIndex].id
+                    llmPage.llmCmd(llmPage.cmdFilterLang, llmPage.filterLang)
+                    llmPage.refresh()
                 }
             }
 
@@ -325,10 +315,22 @@ Page {
                 anchors.topMargin: Theme.paddingSmall
                 x: Theme.horizontalPageMargin
                 width: parent.width - 2 * Theme.horizontalPageMargin
-                text: qsTr("On device: %1 of %2 models, %3")
-                      .arg(llmPage.downloadedCount())
-                      .arg((llmPage.llmModels || []).length)
-                      .arg(llmPage.humanSize(llmPage.downloadedBytes()))
+                text: qsTr("On device: %1, %2")
+                      .arg(llmPage.onDeviceCount)
+                      .arg(llmPage.onDeviceHuman)
+                color: Theme.secondaryColor
+                font.pixelSize: Theme.fontSizeExtraSmall
+                wrapMode: Text.Wrap
+            }
+
+            Label {
+                id: legendLabel
+                anchors.top: summaryLabel.bottom
+                anchors.topMargin: 2
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                text: qsTr("Free: %1 RAM · %2 disk")
+                      .arg(llmPage.ramHuman).arg(llmPage.diskHuman)
                 color: Theme.secondaryColor
                 font.pixelSize: Theme.fontSizeExtraSmall
                 wrapMode: Text.Wrap
@@ -346,8 +348,7 @@ Page {
                                          ? Theme.paddingSmall + 6 : 0)
                                       + Theme.paddingMedium)
 
-            onClicked: llmPage.onRowTap(isHeader, kind, modelId, dlstate,
-                                        downloaded)
+            onClicked: llmPage.onRowTap(isHeader, kind, modelId)
 
             Label {
                 id: headerArrow
@@ -368,17 +369,27 @@ Page {
                 x: Theme.horizontalPageMargin + Theme.itemSizeSmall + Theme.paddingSmall
                 width: parent.width - x - Theme.horizontalPageMargin
                 anchors.verticalCenter: parent.verticalCenter
-                text: (total === done) ? title + " (" + done + ")"
-                                       : title + " (" + done + "/" + total + ")"
+                text: title + " (" + count + ")"
                 color: parent.highlighted ? Theme.highlightColor : Theme.primaryColor
                 font.pixelSize: Theme.fontSizeSmall
                 truncationMode: TruncationMode.Fade
             }
 
+            Rectangle {
+                id: fitDot
+                visible: !isHeader && fit !== ""
+                width: 10
+                height: 10
+                radius: 5
+                color: llmPage.fitColor(fit)
+                x: Theme.horizontalPageMargin
+                anchors.verticalCenter: parent.verticalCenter
+            }
+
             Column {
                 id: textCol
                 visible: !isHeader
-                x: Theme.horizontalPageMargin
+                x: Theme.horizontalPageMargin + (fitDot.visible ? 10 + Theme.paddingSmall : 0)
                 width: parent.width - 2 * Theme.horizontalPageMargin
                          - Theme.itemSizeMedium - Theme.paddingMedium
                 anchors.verticalCenter: parent.verticalCenter
@@ -420,19 +431,25 @@ Page {
                 }
             }
 
-            Label {
-                id: iconLbl
+            // Right-side quick action (download / cancel / select). The row tap
+            // itself opens the detail card.
+            MouseArea {
                 visible: !isHeader
                 anchors.right: parent.right
                 anchors.rightMargin: Theme.paddingSmall
                 anchors.verticalCenter: parent.verticalCenter
                 width: Theme.itemSizeMedium
-                horizontalAlignment: Text.AlignHCenter
-                text: llmPage.glyph({ state: dlstate, model_id: modelId,
-                                     downloaded: downloaded })
-                color: llmPage.glyphColor({ state: dlstate, model_id: modelId,
-                                            downloaded: downloaded })
-                font.pixelSize: Theme.fontSizeSmall
+                height: Theme.itemSizeMedium
+                onClicked: llmPage.quickAction(modelId, dlstate, downloaded)
+
+                Label {
+                    anchors.centerIn: parent
+                    text: llmPage.glyph({ state: dlstate, model_id: modelId,
+                                          downloaded: downloaded })
+                    color: llmPage.glyphColor({ state: dlstate, model_id: modelId,
+                                                downloaded: downloaded })
+                    font.pixelSize: Theme.fontSizeSmall
+                }
             }
 
             Rectangle {
@@ -466,8 +483,10 @@ Page {
         }
 
         ViewPlaceholder {
-            enabled: list.count === 0
-            text: qsTr("No models for the selected language")
+            enabled: (llmPage.dlModels.length + llmPage.catModels.length) === 0
+            text: llmPage.query !== ""
+                  ? qsTr("Nothing matches «%1»").arg(llmPage.query)
+                  : qsTr("No models in the catalog")
         }
 
         PullDownMenu {

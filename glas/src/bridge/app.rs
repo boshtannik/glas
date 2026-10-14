@@ -270,6 +270,11 @@ pub struct AppBridge {
         self.llm.command(&cmd, &val);
     }),
 
+    /// QML: one LLM model by id (ignores the search filter) for the detail card.
+    llm_model_json: qt_method!(fn llm_model_json(&mut self, id: QString) -> QString {
+        QString::from(self.llm.model_json_by_id(&id.to_string()))
+    }),
+
     /// QML: the profile as JSON (`{schema, facts:{key:{value,updated,source}}}`).
     memory_facts: qt_method!(fn memory_facts(&self) -> QString {
         QString::from(self.memory.borrow().facts_json().to_string())
