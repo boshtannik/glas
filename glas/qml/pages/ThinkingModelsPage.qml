@@ -19,6 +19,8 @@ Page {
     property string diskHuman: ""
     property int onDeviceCount: 0
     property string onDeviceHuman: ""
+    property bool updating: false
+    property string updateError: ""
 
     property string filterLang: "auto"
     property bool dlExpanded: true
@@ -76,6 +78,8 @@ Page {
             var od = vo.on_device || {}
             llmPage.onDeviceCount = od.count ? od.count : 0
             llmPage.onDeviceHuman = od.human || ""
+            llmPage.updating = !!vo.updating
+            llmPage.updateError = vo.update_error || ""
             if (vo.langs && vo.langs.length) {
                 var opts = [{ id: "auto", name: qsTr("Auto") }]
                 for (var i = 0; i < vo.langs.length; i++) {
@@ -271,6 +275,7 @@ Page {
             width: parent.width
             height: searchField.height + filterCombo.height
                     + summaryLabel.height + legendLabel.height
+                    + (updateLabel.visible ? updateLabel.height + Theme.paddingSmall : 0)
                     + Theme.paddingMedium
 
             SearchField {
@@ -328,6 +333,21 @@ Page {
                 text: qsTr("Free: %1 RAM · %2 disk")
                       .arg(llmPage.ramHuman).arg(llmPage.diskHuman)
                 color: Theme.secondaryColor
+                font.pixelSize: Theme.fontSizeExtraSmall
+                wrapMode: Text.Wrap
+            }
+
+            Label {
+                id: updateLabel
+                visible: llmPage.updating || llmPage.updateError !== ""
+                anchors.top: legendLabel.bottom
+                anchors.topMargin: visible ? Theme.paddingSmall : 0
+                x: Theme.horizontalPageMargin
+                width: parent.width - 2 * Theme.horizontalPageMargin
+                text: llmPage.updateError !== ""
+                      ? qsTr("Catalog update failed: %1").arg(llmPage.updateError)
+                      : qsTr("Updating catalog from Hugging Face…")
+                color: llmPage.updateError !== "" ? "#e53935" : Theme.highlightColor
                 font.pixelSize: Theme.fontSizeExtraSmall
                 wrapMode: Text.Wrap
             }
@@ -487,7 +507,10 @@ Page {
 
         PullDownMenu {
             MenuItem {
-                text: qsTr("Update model catalogs")
+                text: llmPage.updating
+                      ? qsTr("Updating…")
+                      : qsTr("Update model catalogs")
+                enabled: !llmPage.updating
                 onClicked: llmPage.llmCmd(llmPage.cmdCatalogUpdate, "")
             }
         }

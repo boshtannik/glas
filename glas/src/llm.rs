@@ -5,7 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,13 @@ pub fn models_root() -> PathBuf {
 
 fn catalog_path() -> PathBuf {
     store_dir().join("catalog.json")
+}
+
+/// Glas's own LLM catalog, kept apart from opencode's shared `catalog.json`
+/// (which holds STT/TTS) so neither app overwrites the other's entries.
+/// Written by the Hugging Face updater; takes precedence when present.
+fn llm_catalog_path() -> PathBuf {
+    store_dir().join("llm_catalog.json")
 }
 
 /// Packaged catalog used as a fallback when the working copy is missing.
@@ -133,6 +141,12 @@ pub struct LlmStore {
     query: String,
     /// Language filter ("auto" = no filter).
     filter_lang: String,
+    /// In-flight Hugging Face catalog update.
+    updating: bool,
+    /// Last catalog-update failure ("" when the last run succeeded).
+    update_error: String,
+    /// Receives the result of the background catalog fetch.
+    update_rx: Option<mpsc::Receiver<Result<usize, String>>>,
 }
 
 impl Default for LlmStore {
@@ -240,6 +254,200 @@ fn fit_for(size: u64, ram_avail: u64, disk_avail: u64) -> (&'static str, u64) {
     (fit, need)
 }
 
+// ───────────────────────── Hugging Face catalog ─────────────────────────
+
+/// A hand-picked Hugging Face repo surfaced as an LLM. The GGUF file and its
+/// exact size are resolved live (see [`fetch_llm_catalog`]); we only pin the
+/// repo id, a stable model id and the display metadata.
+struct HfRepo {
+    repo: &'static str,
+    id: &'static str,
+    name: &'static str,
+    lang: &'static str,
+    params: &'static str,
+    desc: &'static str,
+}
+
+/// Curated GGUF candidates for llama.cpp. Kept deliberately small.
+const CURATED: &[HfRepo] = &[
+    HfRepo {
+        repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+        id: "qwen2.5-0.5b-instruct-q4_k_m",
+        name: "Qwen2.5 0.5B Instruct",
+        lang: "multilang",
+        params: "0.5B",
+        desc: "Самая лёгкая Qwen2.5 — быстрый оффлайн-черновик и короткие ответы.",
+    },
+    HfRepo {
+        repo: "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        id: "qwen2.5-1.5b-instruct-q4_k_m",
+        name: "Qwen2.5 1.5B Instruct",
+        lang: "multilang",
+        params: "1.5B",
+        desc: "Баланс качества и размера; хороша для извлечения интентов.",
+    },
+    HfRepo {
+        repo: "Qwen/Qwen2.5-3B-Instruct-GGUF",
+        id: "qwen2.5-3b-instruct-q4_k_m",
+        name: "Qwen2.5 3B Instruct",
+        lang: "multilang",
+        params: "3B",
+        desc: "Заметно умнее, но тяжелее — на грани по памяти.",
+    },
+    HfRepo {
+        repo: "HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
+        id: "smollm2-360m-instruct-q8_0",
+        name: "SmolLM2 360M Instruct",
+        lang: "en",
+        params: "360M",
+        desc: "Крошечная англоязычная модель для самых слабых устройств.",
+    },
+    HfRepo {
+        repo: "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
+        id: "smollm2-1.7b-instruct-q4_k_m",
+        name: "SmolLM2 1.7B Instruct",
+        lang: "en",
+        params: "1.7B",
+        desc: "Крупнее 360M; только английский.",
+    },
+    HfRepo {
+        repo: "bartowski/gemma-2-2b-it-GGUF",
+        id: "gemma-2-2b-it-q4_k_m",
+        name: "Gemma 2 2B Instruct",
+        lang: "multilang",
+        params: "2B",
+        desc: "Google Gemma 2 — сильные многоязычные ответы.",
+    },
+];
+
+/// GGUF quantization preference, best value first; matched case-insensitively
+/// as a substring of the file name.
+const QUANT_PREF: &[&str] = &[
+    "q4_k_m", "q4_k_s", "q4_0", "q5_k_m", "q3_k_m", "q8_0", "q6_k", "q2_k", "iq4_xs",
+];
+
+/// Real file size, preferring the LFS entry (the plain `size` can be a pointer).
+fn hf_size(f: &serde_json::Value) -> u64 {
+    f.get("lfs")
+        .and_then(|l| l.get("size"))
+        .and_then(|s| s.as_u64())
+        .or_else(|| f.get("size").and_then(|s| s.as_u64()))
+        .unwrap_or(0)
+}
+
+/// Pick the best GGUF in a repo tree: the first matching [`QUANT_PREF`] file
+/// (skipping split shards and projector helpers), else the smallest gguf.
+/// Returns `(size, path, quant_label)`.
+fn pick_gguf(files: &[serde_json::Value]) -> Option<(u64, String, String)> {
+    let candidates: Vec<(u64, String)> = files
+        .iter()
+        .filter_map(|f| {
+            let path = f.get("path").and_then(|p| p.as_str())?;
+            let low = path.to_ascii_lowercase();
+            if !low.ends_with(".gguf") || low.contains("mmproj") || low.contains("-of-") {
+                return None;
+            }
+            Some((hf_size(f), path.to_string()))
+        })
+        .collect();
+    let hit = QUANT_PREF.iter().find_map(|want| {
+        candidates
+            .iter()
+            .find(|(_, path)| path.to_ascii_lowercase().contains(want))
+            .map(|(size, path)| (*size, path.clone(), want.to_ascii_uppercase()))
+    });
+    hit.or_else(|| {
+        candidates
+            .iter()
+            .min_by_key(|(size, _)| *size)
+            .map(|(size, path)| (*size, path.clone(), String::new()))
+    })
+}
+
+/// Resolve one curated repo to a catalog entry via the Hugging Face tree API.
+fn fetch_one(
+    client: &reqwest::blocking::Client,
+    spec: &HfRepo,
+) -> Result<serde_json::Value, String> {
+    let api = format!(
+        "https://huggingface.co/api/models/{}/tree/main?recursive=true",
+        spec.repo
+    );
+    let body = client
+        .get(&api)
+        .send()
+        .map_err(|e| format!("запрос: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("HTTP: {e}"))?
+        .text()
+        .map_err(|e| format!("чтение: {e}"))?;
+    let files: Vec<serde_json::Value> =
+        serde_json::from_str(&body).map_err(|e| format!("JSON: {e}"))?;
+    let (size, path, quant) = pick_gguf(&files).ok_or("в репозитории нет GGUF")?;
+    if size == 0 {
+        return Err("нулевой размер файла".to_string());
+    }
+    let url = format!(
+        "https://huggingface.co/{}/resolve/main/{}?download=true",
+        spec.repo, path
+    );
+    Ok(serde_json::json!({
+        "model_id": spec.id,
+        "name": spec.name,
+        "engine": "llm_llamacpp",
+        "role": "llm",
+        "lang_id": spec.lang,
+        "size": size.to_string(),
+        "description": spec.desc,
+        "quant": quant,
+        "params": spec.params,
+        "urls": [url],
+    }))
+}
+
+/// Query the Hugging Face API for every curated repo and write the resulting
+/// catalog to [`llm_catalog_path`]. Returns the number of models written.
+fn fetch_llm_catalog() -> Result<usize, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("harbour-glas/0.1")
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut models = Vec::new();
+    for spec in CURATED {
+        match fetch_one(&client, spec) {
+            Ok(v) => models.push(v),
+            Err(e) => log::warn!("llm: {}: {e}", spec.repo),
+        }
+    }
+    if models.is_empty() {
+        return Err("Hugging Face: ни одной модели не получено".to_string());
+    }
+    let count = models.len();
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let catalog = serde_json::json!({
+        "schema": 1,
+        "version": format!("hf-{secs}"),
+        "langs": [
+            { "id": "multilang", "name": "Multilingual" },
+            { "id": "en", "name": "English" },
+        ],
+        "models": models,
+    });
+    let dir = store_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("папка данных: {e}"))?;
+    let tmp = dir.join("llm_catalog.json.tmp");
+    let dest = llm_catalog_path();
+    std::fs::write(&tmp, serde_json::to_string_pretty(&catalog).unwrap_or_default())
+        .map_err(|e| format!("запись каталога: {e}"))?;
+    std::fs::rename(&tmp, &dest).map_err(|e| format!("сохранить каталог: {e}"))?;
+    log::info!("llm: HF catalog updated: {count} models -> {}", dest.display());
+    Ok(count)
+}
+
 impl LlmStore {
     pub fn load() -> Self {
         let mut store = LlmStore {
@@ -249,6 +457,9 @@ impl LlmStore {
             errors: std::collections::HashSet::new(),
             query: String::new(),
             filter_lang: "auto".to_string(),
+            updating: false,
+            update_error: String::new(),
+            update_rx: None,
         };
         // Default to the single installed STT model if nothing is chosen yet.
         store.validate_state();
@@ -256,7 +467,7 @@ impl LlmStore {
     }
 
     fn read_catalog() -> Catalog {
-        for path in [catalog_path(), packaged_catalog()] {
+        for path in [llm_catalog_path(), catalog_path(), packaged_catalog()] {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 if let Ok(cat) = serde_json::from_str::<Catalog>(&text) {
                     return cat;
@@ -324,6 +535,50 @@ impl LlmStore {
         models_root().join(&m.model_id)
     }
 
+    /// Kick off a Hugging Face catalog refresh in the background (idempotent).
+    fn start_catalog_update(&mut self) {
+        if self.updating {
+            return;
+        }
+        self.updating = true;
+        self.update_error.clear();
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = fetch_llm_catalog();
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Non-blocking drain of the background catalog fetch.
+    fn poll_update(&mut self) {
+        let msg = match self.update_rx.as_ref() {
+            Some(rx) => match rx.try_recv() {
+                Ok(m) => Some(m),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("worker stopped".to_string()))
+                }
+            },
+            None => None,
+        };
+        if let Some(res) = msg {
+            self.update_rx = None;
+            self.updating = false;
+            match res {
+                Ok(n) => {
+                    self.catalog = Self::read_catalog();
+                    self.update_error.clear();
+                    log::info!("llm: catalog reloaded from HF ({n} models)");
+                }
+                Err(e) => {
+                    log::warn!("llm: catalog update failed: {e}");
+                    self.update_error = e;
+                }
+            }
+        }
+    }
+
     fn is_downloaded(&self, m: &ModelEntry) -> bool {
         if m.urls.is_empty() {
             return false;
@@ -367,6 +622,7 @@ impl LlmStore {
     /// `{query, llm, lang, version, langs, device, downloaded[], catalog[]}`.
     pub fn status_json(&mut self) -> String {
         self.reap_finished();
+        self.poll_update();
         self.validate_state();
 
         let ram_avail = mem_available_bytes();
@@ -402,6 +658,8 @@ impl LlmStore {
             "lang": self.state.lang,
             "version": self.catalog.version,
             "langs": self.catalog.langs,
+            "updating": self.updating,
+            "update_error": self.update_error,
             "device": {
                 "ram_available": ram_avail,
                 "ram_human": human_size(ram_avail),
@@ -422,6 +680,7 @@ impl LlmStore {
     /// One model by id (ignores the search filter) — used by the detail card.
     pub fn model_json_by_id(&mut self, id: &str) -> String {
         self.reap_finished();
+        self.poll_update();
         self.validate_state();
         let ram_avail = mem_available_bytes();
         let disk_avail = disk_available_bytes(&store_dir());
@@ -526,10 +785,7 @@ impl LlmStore {
             "voice_download" | "llm_download" => self.start_download(val),
             "voice_download_cancel" | "llm_download_cancel" => self.cancel_download(val),
             "voice_delete" | "llm_delete" => self.delete_model(val),
-            "voice_catalog_update" => {
-                self.catalog = Self::read_catalog();
-                log::info!("llm: catalog reloaded ({} models)", self.catalog.models.len());
-            }
+            "voice_catalog_update" | "llm_catalog_update" => self.start_catalog_update(),
             other => log::info!("llm_command ignored: {other}"),
         }
     }

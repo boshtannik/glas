@@ -26,6 +26,7 @@ sailors = { path = "vendor/sailors" }
 cpal = { version = "0.15", optional = true }
 hound = { version = "3", optional = true }
 libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "rustls-tls"] }
 
 [workspace]
 members = ["memory"]
