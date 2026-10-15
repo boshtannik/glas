@@ -13,9 +13,9 @@ use crate::voice::{self, Recorder, VoiceStore};
 
 /// Rust ↔ QML bridge.
 ///
-/// Skeleton: a status property, a couple of methods and the long-term memory
-/// store. The real version will add `Arc<Mutex<..>>` queues and a worker
-/// (see the mason reference, `bridge/app.rs`).
+/// Holds the model stores (voice + LLM), the push-to-talk recorder, settings
+/// and long-term memory. Long-running work runs on background threads and hands
+/// results back over `mpsc`; the QML polls via `poll` / `*_status_json`.
 #[derive(Default, QObject)]
 pub struct AppBridge {
     base: qt_base_class!(trait QObject),
