@@ -44,13 +44,13 @@ case "$MODE" in
     export RUSTFLAGS="-Clink-arg=-Wl,-z,relro,-z,now -Ccodegen-units=1 -Clink-arg=-rdynamic"
     export CARGO_INCREMENTAL=0
     export CARGO_TARGET_DIR=/home/mersdk/cargo-cache/cargo/release
-    cargo build --release -j 4
+    cargo build --release -j 1
     ;;
   *)
     export RUSTFLAGS="-Clink-arg=-Wl,-z,relro,-z,now -Clink-arg=-rdynamic"
     export CARGO_INCREMENTAL=1
     export CARGO_TARGET_DIR=/home/mersdk/cargo-cache/cargo/debug
-    cargo build -j 4
+    cargo build -j 1
     ;;
 esac
 

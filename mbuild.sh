@@ -35,10 +35,6 @@ rm -f "$OUT"/*.rpm
 
 docker run --rm \
   -e MBUILD_MODE="$MODE" \
-  -e CARGO_NET_RETRY=10 \
-  -e CARGO_HTTP_MULTIPLEXING=false \
-  -e CARGO_HTTP_TIMEOUT=120 \
-  -e CARGO_HTTP_LOW_SPEED_LIMIT=1 \
   -v "$PROJ:/src:ro" \
   -v "$OUT:/out" \
   -v "$CACHE:/home/mersdk/cargo-cache" \
