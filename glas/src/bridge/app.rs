@@ -319,6 +319,11 @@ pub struct AppBridge {
         crate::infer::available()
     }),
 
+    /// QML: whether a model is currently resident in RAM.
+    llm_loaded: qt_method!(fn llm_loaded(&self) -> bool {
+        crate::infer::loaded()
+    }),
+
     /// QML: run the on-device LLM on `text` (background thread; poll `poll`).
     llm_generate: qt_method!(fn llm_generate(&mut self, text: QString, max_new: i32, temperature: f64) {
         if self.gen_busy {

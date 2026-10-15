@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::tokenizer::TokenizerFromGguf;
@@ -52,12 +53,41 @@ struct Loaded {
     device: Device,
     eos: Vec<u32>,
     path: PathBuf,
+    /// When the model was last used; drives the idle auto-unload.
+    last_used: Instant,
 }
 
 static MODEL: OnceLock<Mutex<Option<Loaded>>> = OnceLock::new();
 
 fn slot() -> &'static Mutex<Option<Loaded>> {
     MODEL.get_or_init(|| Mutex::new(None))
+}
+
+/// How long the model may sit unused before it is dropped to free RAM.
+const IDLE_UNLOAD: Duration = Duration::from_secs(60);
+/// How often the watchdog checks for an idle model.
+const WATCHDOG_TICK: Duration = Duration::from_secs(5);
+
+static WATCHDOG: OnceLock<()> = OnceLock::new();
+
+/// Drop the resident model once it has been idle for [`IDLE_UNLOAD`].
+fn start_watchdog() {
+    WATCHDOG.get_or_init(|| {
+        std::thread::spawn(|| loop {
+            std::thread::sleep(WATCHDOG_TICK);
+            // `try_lock` so we never block behind a long generation.
+            if let Ok(mut guard) = slot().try_lock() {
+                let idle = guard
+                    .as_ref()
+                    .map(|l| l.last_used.elapsed() >= IDLE_UNLOAD)
+                    .unwrap_or(false);
+                if idle {
+                    *guard = None;
+                    log::info!("infer: unloaded idle model (freeing RAM)");
+                }
+            }
+        });
+    });
 }
 
 /// Stop tokens: the GGUF `eos_token_id` plus well-known end-of-turn markers.
@@ -138,6 +168,7 @@ fn load(path: &Path) -> Result<Loaded, String> {
         device,
         eos,
         path: path.to_path_buf(),
+        last_used: Instant::now(),
     })
 }
 
@@ -197,6 +228,7 @@ impl Loaded {
             pos += 1;
         }
 
+        self.last_used = Instant::now();
         tokens.clear();
         self.tokenizer
             .decode(&out, true)
@@ -208,6 +240,7 @@ impl Loaded {
 /// Run the model on `prompt`, deviating from greedy only when `temperature > 0`.
 /// The model is loaded on first use and kept resident for later calls.
 pub fn generate(prompt: &str, max_new: usize, temperature: f64) -> Result<String, String> {
+    start_watchdog();
     let path = crate::llm::resolve_llm().ok_or_else(|| "no LLM selected".to_string())?;
     let mut guard = slot().lock().map_err(|_| "model lock poisoned".to_string())?;
     let stale = guard.as_ref().map(|l| l.path != path).unwrap_or(true);
@@ -220,8 +253,16 @@ pub fn generate(prompt: &str, max_new: usize, temperature: f64) -> Result<String
 /// Drop the resident model, freeing its memory.
 pub fn unload() {
     if let Ok(mut guard) = slot().lock() {
+        if guard.is_some() {
+            log::info!("infer: unloaded model on request");
+        }
         *guard = None;
     }
+}
+
+/// Whether a model is currently resident in memory.
+pub fn loaded() -> bool {
+    slot().try_lock().map(|g| g.is_some()).unwrap_or(true)
 }
 
 /// Whether a GGUF model is selected and loadable.
@@ -231,6 +272,7 @@ pub fn available() -> bool {
 
 /// Warm the model up (load only); useful to hide the first-token latency.
 pub fn warmup() -> Result<(), String> {
+    start_watchdog();
     let path = crate::llm::resolve_llm().ok_or_else(|| "no LLM selected".to_string())?;
     let mut guard = slot().lock().map_err(|_| "model lock poisoned".to_string())?;
     if guard.as_ref().map(|l| l.path != path).unwrap_or(true) {
