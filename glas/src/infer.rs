@@ -119,7 +119,7 @@ fn load(path: &Path) -> Result<Loaded, String> {
                 .map_err(|e| format!("load weights (phi2): {e}"))?,
         ),
         "phi3" => Model::Phi3(
-            quantized_phi3::ModelWeights::from_gguf(content, &mut file, &device)
+            quantized_phi3::ModelWeights::from_gguf(false, content, &mut file, &device)
                 .map_err(|e| format!("load weights (phi3): {e}"))?,
         ),
         "glm4" => Model::Glm4(
