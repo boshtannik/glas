@@ -63,27 +63,31 @@ fn slot() -> &'static Mutex<Option<Loaded>> {
     MODEL.get_or_init(|| Mutex::new(None))
 }
 
-/// How long the model may sit unused before it is dropped to free RAM.
-const IDLE_UNLOAD: Duration = Duration::from_secs(60);
 /// How often the watchdog checks for an idle model.
 const WATCHDOG_TICK: Duration = Duration::from_secs(5);
 
 static WATCHDOG: OnceLock<()> = OnceLock::new();
 
-/// Drop the resident model once it has been idle for [`IDLE_UNLOAD`].
+/// Drop the resident model once it has been idle for the configured number of
+/// seconds ([`crate::settings::Settings::idle_unload_secs`]; 0 = never unload).
 fn start_watchdog() {
     WATCHDOG.get_or_init(|| {
         std::thread::spawn(|| loop {
             std::thread::sleep(WATCHDOG_TICK);
+            let secs = crate::settings::Settings::load().idle_unload_secs;
+            if secs == 0 {
+                continue;
+            }
+            let idle = Duration::from_secs(secs);
             // `try_lock` so we never block behind a long generation.
             if let Ok(mut guard) = slot().try_lock() {
-                let idle = guard
+                let stale = guard
                     .as_ref()
-                    .map(|l| l.last_used.elapsed() >= IDLE_UNLOAD)
+                    .map(|l| l.last_used.elapsed() >= idle)
                     .unwrap_or(false);
-                if idle {
+                if stale {
                     *guard = None;
-                    log::info!("infer: unloaded idle model (freeing RAM)");
+                    log::info!("infer: unloaded idle model after {secs}s (freeing RAM)");
                 }
             }
         });
@@ -237,32 +241,33 @@ impl Loaded {
     }
 }
 
-/// Run the model on `prompt`, deviating from greedy only when `temperature > 0`.
-/// The model is loaded on first use and kept resident for later calls.
-pub fn generate(prompt: &str, max_new: usize, temperature: f64) -> Result<String, String> {
-    start_watchdog();
+/// Ensure the selected model is resident in `guard`, loading it if needed.
+fn ensure_loaded(guard: &mut Option<Loaded>) -> Result<&mut Loaded, String> {
     let path = crate::llm::resolve_llm().ok_or_else(|| "no LLM selected".to_string())?;
-    let mut guard = slot().lock().map_err(|_| "model lock poisoned".to_string())?;
     let stale = guard.as_ref().map(|l| l.path != path).unwrap_or(true);
     if stale {
         *guard = Some(load(&path)?);
     }
-    guard.as_mut().unwrap().generate(prompt, max_new, temperature)
+    Ok(guard.as_mut().unwrap())
 }
 
-/// Drop the resident model, freeing its memory.
-pub fn unload() {
-    if let Ok(mut guard) = slot().lock() {
-        if guard.is_some() {
-            log::info!("infer: unloaded model on request");
-        }
-        *guard = None;
-    }
+/// Run the model on `prompt`, deviating from greedy only when `temperature > 0`.
+/// The model is loaded on first use and kept resident (dropped by the idle
+/// watchdog) so follow-up calls are fast.
+pub fn generate(prompt: &str, max_new: usize, temperature: f64) -> Result<String, String> {
+    start_watchdog();
+    let mut guard = slot().lock().map_err(|_| "model lock poisoned".to_string())?;
+    ensure_loaded(&mut guard)?.generate(prompt, max_new, temperature)
 }
 
-/// Whether a model is currently resident in memory.
-pub fn loaded() -> bool {
-    slot().try_lock().map(|g| g.is_some()).unwrap_or(true)
+/// Run the model once and drop it immediately afterwards, freeing RAM.
+/// Used by the "try the model" test form; the idle watchdog does not apply.
+pub fn generate_once(prompt: &str, max_new: usize, temperature: f64) -> Result<String, String> {
+    let mut guard = slot().lock().map_err(|_| "model lock poisoned".to_string())?;
+    let res = ensure_loaded(&mut guard)?.generate(prompt, max_new, temperature);
+    *guard = None;
+    log::info!("infer: unloaded model after one-shot generation");
+    res
 }
 
 /// Whether a GGUF model is selected and loadable.
@@ -273,11 +278,8 @@ pub fn available() -> bool {
 /// Warm the model up (load only); useful to hide the first-token latency.
 pub fn warmup() -> Result<(), String> {
     start_watchdog();
-    let path = crate::llm::resolve_llm().ok_or_else(|| "no LLM selected".to_string())?;
     let mut guard = slot().lock().map_err(|_| "model lock poisoned".to_string())?;
-    if guard.as_ref().map(|l| l.path != path).unwrap_or(true) {
-        *guard = Some(load(&path)?);
-    }
+    ensure_loaded(&mut guard)?;
     Ok(())
 }
 

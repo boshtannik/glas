@@ -20,7 +20,8 @@ pub struct Settings {
     /// TTS mode: "off" | "button" | "auto".
     #[serde(default = "default_tts_mode")]
     pub tts_mode: String,
-    /// Seconds of idleness after which models are unloaded from memory.
+    /// Seconds of idleness after which models are unloaded from memory
+    /// (0 = never unload, keep the model resident).
     #[serde(default = "default_idle_unload_secs")]
     pub idle_unload_secs: u64,
     /// Absolute path to the whisper GGML model (empty = auto-detect).
@@ -44,7 +45,7 @@ fn default_tts_mode() -> String {
     "button".into()
 }
 fn default_idle_unload_secs() -> u64 {
-    300
+    120
 }
 fn default_stt_threads() -> u32 {
     4

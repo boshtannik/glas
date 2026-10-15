@@ -319,12 +319,8 @@ pub struct AppBridge {
         crate::infer::available()
     }),
 
-    /// QML: whether a model is currently resident in RAM.
-    llm_loaded: qt_method!(fn llm_loaded(&self) -> bool {
-        crate::infer::loaded()
-    }),
-
     /// QML: run the on-device LLM on `text` (background thread; poll `poll`).
+    /// The model stays resident and is dropped by the idle watchdog.
     llm_generate: qt_method!(fn llm_generate(&mut self, text: QString, max_new: i32, temperature: f64) {
         if self.gen_busy {
             return;
@@ -345,14 +341,25 @@ pub struct AppBridge {
         self.gen_busy_changed();
     }),
 
-    /// QML: drop the resident LLM and free its memory.
-    llm_unload: qt_method!(fn llm_unload(&mut self) {
-        crate::infer::unload();
-        self.gen_rx = None;
+    /// QML: run the on-device LLM once and free it right after (test form).
+    llm_test: qt_method!(fn llm_test(&mut self, text: QString, max_new: i32, temperature: f64) {
         if self.gen_busy {
-            self.gen_busy = false;
-            self.gen_busy_changed();
+            return;
         }
+        let text = text.to_string();
+        let max_new = max_new.max(1) as usize;
+        log::info!(
+            "bridge.llm_test ({} chars, max_new={max_new}, temp={temperature})",
+            text.chars().count()
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let res = crate::infer::generate_once(&text, max_new, temperature);
+            let _ = tx.send(res);
+        });
+        self.gen_rx = Some(rx);
+        self.gen_busy = true;
+        self.gen_busy_changed();
     }),
 
     /// QML: the profile as JSON (`{schema, facts:{key:{value,updated,source}}}`).

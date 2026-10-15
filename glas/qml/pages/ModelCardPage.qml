@@ -126,7 +126,6 @@ Page {
     // ── on-device test generation (candle, in-process) ───────────────────
     property bool genBusy: (typeof bridge !== "undefined") ? bridge.gen_busy : false
     property string answer: (typeof bridge !== "undefined") ? bridge.answer : ""
-    property bool modelLoaded: false
 
     function llmAvailable() {
         return (typeof bridge !== "undefined")
@@ -145,13 +144,7 @@ Page {
         var p = promptField.text
         if (!p || p.length === 0)
             return
-        bridge.llm_generate(p, 64, 0.7)
-    }
-
-    function unloadModel() {
-        if (typeof bridge !== "undefined")
-            bridge.llm_unload()
-        card.modelLoaded = false
+        bridge.llm_test(p, 64, 0.7)
     }
 
     Timer {
@@ -160,11 +153,8 @@ Page {
         repeat: true
         onTriggered: {
             card.refresh()
-            if (typeof bridge !== "undefined") {
+            if (typeof bridge !== "undefined")
                 bridge.poll()
-                card.modelLoaded = (typeof bridge.llm_loaded === "function")
-                                   ? bridge.llm_loaded() : false
-            }
         }
     }
 
@@ -369,13 +359,6 @@ Page {
                                                : qsTr("Generate")
                             enabled: !card.genBusy && promptField.text.length > 0
                             onClicked: card.runTest()
-                        }
-
-                        Button {
-                            text: qsTr("Unload")
-                            visible: card.modelLoaded && !card.genBusy
-                            enabled: card.modelLoaded && !card.genBusy
-                            onClicked: card.unloadModel()
                         }
 
                         BusyIndicator {
