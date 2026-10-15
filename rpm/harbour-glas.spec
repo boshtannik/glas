@@ -47,7 +47,7 @@ case "$MODE" in
     cargo build --release -j 1
     ;;
   *)
-    export RUSTFLAGS="-Clink-arg=-Wl,-z,relro,-z,now -Clink-arg=-rdynamic"
+    export RUSTFLAGS="-Clink-arg=-Wl,-z,relro,-z,now -Clink-arg=-rdynamic -Copt-level=1"
     export CARGO_INCREMENTAL=1
     export CARGO_TARGET_DIR=/home/mersdk/cargo-cache/cargo/debug
     cargo build -j 1
