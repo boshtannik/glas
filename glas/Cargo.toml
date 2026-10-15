@@ -27,6 +27,9 @@ cpal = { version = "0.15", optional = true }
 hound = { version = "3", optional = true }
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "rustls-tls"] }
+candle-core = { version = "0.11", default-features = false }
+candle-transformers = { version = "0.11", default-features = false }
+tokenizers = { version = "0.22", default-features = false }
 
 [workspace]
 members = ["memory"]

@@ -65,6 +65,13 @@ pub struct AppBridge {
     /// Shared LLM (thinking) model catalog, selection and downloads.
     llm: LlmStore,
 
+    /// Result channel of the background LLM generation thread.
+    gen_rx: Option<Receiver<Result<String, String>>>,
+
+    /// True while the on-device LLM generates in the background.
+    gen_busy: qt_property!(bool; NOTIFY gen_busy_changed),
+    gen_busy_changed: qt_signal!(),
+
     /// Liveness check for the bridge.
     ping: qt_method!(fn ping(&self) -> QString {
         QString::from("pong")
@@ -183,6 +190,38 @@ pub struct AppBridge {
 
     /// QML: poll the background transcription (call from a Timer).
     poll: qt_method!(fn poll(&mut self) {
+        // LLM generation finished: surface its text (or an error).
+        if let Some(rx) = self.gen_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(res) => {
+                    self.gen_rx = None;
+                    if self.gen_busy {
+                        self.gen_busy = false;
+                        self.gen_busy_changed();
+                    }
+                    match res {
+                        Ok(text) => {
+                            log::info!("bridge.poll llm: {text:?}");
+                            self.answer = QString::from(text);
+                        }
+                        Err(e) => {
+                            log::warn!("bridge.poll llm error: {e}");
+                            self.answer = QString::from(format!("llm: {e}"));
+                        }
+                    }
+                    self.answer_changed();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.gen_rx = None;
+                    if self.gen_busy {
+                        self.gen_busy = false;
+                        self.gen_busy_changed();
+                    }
+                }
+            }
+        }
+
         // TTS synthesis finished: surface the WAV path (or an error).
         if let Some(rx) = self.tts_rx.as_ref() {
             match rx.try_recv() {
@@ -273,6 +312,42 @@ pub struct AppBridge {
     /// QML: one LLM model by id (ignores the search filter) for the detail card.
     llm_model_json: qt_method!(fn llm_model_json(&mut self, id: QString) -> QString {
         QString::from(self.llm.model_json_by_id(&id.to_string()))
+    }),
+
+    /// QML: whether a GGUF LLM is selected and loadable.
+    llm_available: qt_method!(fn llm_available(&self) -> bool {
+        crate::infer::available()
+    }),
+
+    /// QML: run the on-device LLM on `text` (background thread; poll `poll`).
+    llm_generate: qt_method!(fn llm_generate(&mut self, text: QString, max_new: i32, temperature: f64) {
+        if self.gen_busy {
+            return;
+        }
+        let text = text.to_string();
+        let max_new = max_new.max(1) as usize;
+        log::info!(
+            "bridge.llm_generate ({} chars, max_new={max_new}, temp={temperature})",
+            text.chars().count()
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let res = crate::infer::generate(&text, max_new, temperature);
+            let _ = tx.send(res);
+        });
+        self.gen_rx = Some(rx);
+        self.gen_busy = true;
+        self.gen_busy_changed();
+    }),
+
+    /// QML: drop the resident LLM and free its memory.
+    llm_unload: qt_method!(fn llm_unload(&mut self) {
+        crate::infer::unload();
+        self.gen_rx = None;
+        if self.gen_busy {
+            self.gen_busy = false;
+            self.gen_busy_changed();
+        }
     }),
 
     /// QML: the profile as JSON (`{schema, facts:{key:{value,updated,source}}}`).

@@ -8,6 +8,7 @@
 
 pub mod bridge;
 pub mod cmd;
+pub mod infer;
 pub mod settings;
 pub mod voice;
 

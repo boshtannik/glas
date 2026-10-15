@@ -79,15 +79,6 @@ docker run --rm \
   fi
   find "$HOME/cargo-cache/piper-aarch64" -maxdepth 2 -name piper -type f
   ls -l "$HOME/cargo-cache/piper-aarch64/piper"
-  # llama.cpp (LLM intents) — source in $HOME/cargo-cache (persistent volume).
-  if [ ! -d "$HOME/cargo-cache/llama.cpp" ]; then
-    curl -fsSL -o /tmp/llama.cpp.tar.gz \
-      "https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.6.0.tar.gz"
-    tar -xzf /tmp/llama.cpp.tar.gz -C "$HOME/cargo-cache"
-    mv "$HOME/cargo-cache/llama.cpp-0.6.0" "$HOME/cargo-cache/llama.cpp"
-  fi
-  ln -sfn "$HOME/cargo-cache/llama.cpp" third_party/llama.cpp
-  ls -d third_party/llama.cpp
   mb2 -n -t SailfishOS-5.1.0.11-aarch64 --no-snapshot=force build
   echo "=== RPM ($MBUILD_MODE) ==="
   ls -l RPMS/*.rpm

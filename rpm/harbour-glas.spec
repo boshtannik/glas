@@ -44,13 +44,13 @@ case "$MODE" in
     export RUSTFLAGS="-Clink-arg=-Wl,-z,relro,-z,now -Ccodegen-units=1 -Clink-arg=-rdynamic"
     export CARGO_INCREMENTAL=0
     export CARGO_TARGET_DIR=/home/mersdk/cargo-cache/cargo/release
-    cargo build --release -j 1
+    cargo build --release -j 4
     ;;
   *)
     export RUSTFLAGS="-Clink-arg=-Wl,-z,relro,-z,now -Clink-arg=-rdynamic"
     export CARGO_INCREMENTAL=1
     export CARGO_TARGET_DIR=/home/mersdk/cargo-cache/cargo/debug
-    cargo build -j 1
+    cargo build -j 4
     ;;
 esac
 
@@ -68,26 +68,12 @@ ls -l main
 test -x /home/mersdk/cargo-cache/piper-aarch64/piper/piper
 ls -l /home/mersdk/cargo-cache/piper-aarch64/piper
 
-# llama.cpp (LLM intents): a static llama-cli. Prepared by mbuild.sh (symlink).
-cd ../llama.cpp
-cmake -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DLLAMA_CURL=OFF \
-  -DLLAMA_BUILD_TESTS=OFF \
-  -DLLAMA_BUILD_SERVER=OFF \
-  -DGGML_NATIVE=OFF
-cmake --build build --target llama-cli -j4
-test -x build/bin/llama-cli
-ls -l build/bin/llama-cli
-
 # - INSTALL --------------------------------------------------------------------
 %install
 MODE="${MBUILD_MODE:-debug}"
 rm -rf %{buildroot}
 install -Dm 755 /home/mersdk/cargo-cache/cargo/$MODE/aarch64-unknown-linux-gnu/$MODE/harbour-glas -t %{buildroot}%{_bindir}
 install -Dm 755 third_party/whisper.cpp/main %{buildroot}%{_libexecdir}/%{name}/whisper-cli
-install -Dm 755 third_party/llama.cpp/build/bin/llama-cli %{buildroot}%{_libexecdir}/%{name}/llama-cli
 mkdir -p %{buildroot}%{_libexecdir}/%{name}/piper
 cp -a /home/mersdk/cargo-cache/piper-aarch64/piper/. %{buildroot}%{_libexecdir}/%{name}/piper/
 install -Dm 644 glas/assets/models.json -t %{buildroot}%{_datadir}/%{name}
@@ -119,7 +105,6 @@ fi
 %defattr(-,root,root,-)
 %{_bindir}/harbour-glas
 %{_libexecdir}/%{name}/whisper-cli
-%{_libexecdir}/%{name}/llama-cli
 %{_libexecdir}/%{name}/piper
 %{_datadir}/%{name}/qml
 %{_datadir}/%{name}/models.json
