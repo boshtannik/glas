@@ -9,14 +9,45 @@ use std::sync::{Mutex, OnceLock};
 
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::tokenizer::TokenizerFromGguf;
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::quantized_llama::ModelWeights;
+use candle_transformers::models::{
+    quantized_gemma3, quantized_glm4, quantized_lfm2, quantized_llama, quantized_phi,
+    quantized_phi3, quantized_qwen2, quantized_qwen3,
+};
 use tokenizers::Tokenizer;
+
+/// The model architectures we can run, chosen from the GGUF metadata
+/// (`general.architecture`). All of them expose the same `forward(&x, pos)`.
+enum Model {
+    Llama(quantized_llama::ModelWeights),
+    Qwen2(quantized_qwen2::ModelWeights),
+    Qwen3(quantized_qwen3::ModelWeights),
+    Gemma3(quantized_gemma3::ModelWeights),
+    Phi(quantized_phi::ModelWeights),
+    Phi3(quantized_phi3::ModelWeights),
+    Glm4(quantized_glm4::ModelWeights),
+    Lfm2(quantized_lfm2::ModelWeights),
+}
+
+impl Model {
+    fn forward(&mut self, x: &Tensor, pos: usize) -> candle_core::Result<Tensor> {
+        match self {
+            Model::Llama(m) => m.forward(x, pos),
+            Model::Qwen2(m) => m.forward(x, pos),
+            Model::Qwen3(m) => m.forward(x, pos),
+            Model::Gemma3(m) => m.forward(x, pos),
+            Model::Phi(m) => m.forward(x, pos),
+            Model::Phi3(m) => m.forward(x, pos),
+            Model::Glm4(m) => m.forward(x, pos),
+            Model::Lfm2(m) => m.forward(x, pos),
+        }
+    }
+}
 
 /// A loaded model plus its tokenizer, kept resident between calls.
 struct Loaded {
-    model: ModelWeights,
+    model: Model,
     tokenizer: Tokenizer,
     device: Device,
     eos: Vec<u32>,
@@ -62,8 +93,45 @@ fn load(path: &Path) -> Result<Loaded, String> {
     let tokenizer =
         Tokenizer::from_gguf(&content).map_err(|e| format!("build tokenizer: {e}"))?;
     let eos = stop_tokens(&content, &tokenizer);
-    let model = ModelWeights::from_gguf(content, &mut file, &device)
-        .map_err(|e| format!("load weights: {e}"))?;
+    let arch = match content.metadata.get("general.architecture") {
+        Some(gguf_file::Value::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let model = match arch.as_str() {
+        "llama" => Model::Llama(
+            quantized_llama::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load weights (llama): {e}"))?,
+        ),
+        "qwen2" => Model::Qwen2(
+            quantized_qwen2::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load weights (qwen2): {e}"))?,
+        ),
+        "qwen3" => Model::Qwen3(
+            quantized_qwen3::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load weights (qwen3): {e}"))?,
+        ),
+        "gemma" | "gemma2" | "gemma3" => Model::Gemma3(
+            quantized_gemma3::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load weights (gemma3): {e}"))?,
+        ),
+        "phi2" => Model::Phi(
+            quantized_phi::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load weights (phi2): {e}"))?,
+        ),
+        "phi3" => Model::Phi3(
+            quantized_phi3::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load weights (phi3): {e}"))?,
+        ),
+        "glm4" => Model::Glm4(
+            quantized_glm4::ModelWeights::from_gguf(content, &mut file, &device, DType::F32)
+                .map_err(|e| format!("load weights (glm4): {e}"))?,
+        ),
+        "lfm2" => Model::Lfm2(
+            quantized_lfm2::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load weights (lfm2): {e}"))?,
+        ),
+        other => return Err(format!("unsupported model architecture: {other:?}")),
+    };
     Ok(Loaded {
         model,
         tokenizer,

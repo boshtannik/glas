@@ -123,11 +123,39 @@ Page {
         card.refresh()
     }
 
+    // ── on-device test generation (candle, in-process) ───────────────────
+    property bool genBusy: (typeof bridge !== "undefined") ? bridge.gen_busy : false
+    property string answer: (typeof bridge !== "undefined") ? bridge.answer : ""
+
+    function llmAvailable() {
+        return (typeof bridge !== "undefined")
+                && (typeof bridge.llm_available === "function")
+                && bridge.llm_available()
+    }
+
+    function canTest() {
+        var m = card.model || {}
+        return !!m.downloaded && card.isSelected() && card.llmAvailable()
+    }
+
+    function runTest() {
+        if (typeof bridge === "undefined")
+            return
+        var p = promptField.text
+        if (!p || p.length === 0)
+            return
+        bridge.llm_generate(p, 64, 0.7)
+    }
+
     Timer {
         interval: 500
         running: card.status === PageStatus.Active
         repeat: true
-        onTriggered: card.refresh()
+        onTriggered: {
+            card.refresh()
+            if (typeof bridge !== "undefined")
+                bridge.poll()
+        }
     }
 
     PageHeader {
@@ -288,6 +316,68 @@ Page {
                 onClicked: {
                     card.llmCmd("llm_delete", card.model.model_id)
                     card.refresh()
+                }
+            }
+
+            // ── on-device test generation ────────────────────────────────
+            Item {
+                width: parent.width
+                height: testColumn.height + Theme.paddingLarge
+                visible: card.canTest()
+
+                Column {
+                    id: testColumn
+                    width: parent.width
+                    spacing: Theme.paddingSmall
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Label {
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2 * Theme.horizontalPageMargin
+                        text: qsTr("Try the model on-device")
+                        color: Theme.highlightColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+
+                    TextField {
+                        id: promptField
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2 * Theme.horizontalPageMargin
+                        placeholderText: qsTr("Ask something…")
+                        text: "Hello! In one sentence, what are you?"
+                        enabled: !card.genBusy
+                        EnterKey.iconSource: "image://theme/icon-m-enter-accept"
+                        EnterKey.onClicked: card.runTest()
+                    }
+
+                    Row {
+                        x: Theme.horizontalPageMargin
+                        spacing: Theme.paddingMedium
+
+                        Button {
+                            text: card.genBusy ? qsTr("Generating…")
+                                               : qsTr("Generate")
+                            enabled: !card.genBusy && promptField.text.length > 0
+                            onClicked: card.runTest()
+                        }
+
+                        BusyIndicator {
+                            size: BusyIndicatorSize.Medium
+                            running: card.genBusy
+                            visible: card.genBusy
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                    }
+
+                    Label {
+                        x: Theme.horizontalPageMargin
+                        width: parent.width - 2 * Theme.horizontalPageMargin
+                        visible: card.answer.length > 0
+                        text: card.answer
+                        wrapMode: Text.Wrap
+                        color: Theme.primaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
                 }
             }
 
