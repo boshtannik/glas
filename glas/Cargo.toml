@@ -32,7 +32,7 @@ candle-transformers = { version = "0.11", default-features = false }
 tokenizers = { version = "0.22", default-features = false }
 
 [workspace]
-members = ["memory"]
+members = ["memory", "core"]
 
 [features]
 default = []
