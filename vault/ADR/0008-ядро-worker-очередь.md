@@ -28,11 +28,19 @@
    - `AwaitingConfirmation` — пауза автомата под подтверждение опасного действия (round-trip
      через ту же очередь).
 4. **Протокол — исчерпывающие enum'ы + константы** (правила владельца из opencode):
-   - `Command` (UI → ядро): `CaptureStart`/`CaptureStop`, `Cancel`, `Confirm`, `MemorySet`/`MemoryForget`, команды model-store, …
-   - `Event` (ядро → UI): `Transcribed`, `ModelOutput`, `AnswerReady`, `NeedsConfirmation`, `ActionResult`, `TtsReady`, `Error`, прогресс загрузок, …
+   - `Command` (UI/окружение → ядро): `CaptureStart`/`CaptureStop`, `Cancel`, `Confirm { approved }`,
+     `Transcribed { text }`, `MemorySet { key, value }`/`MemoryForget { key }`, `Shutdown`.
+     Со временем — команды model-store (загрузка/выгрузка моделей).
+   - `Event` (ядро → UI): `StateChanged`, `Transcribed`, `SessionStarted`/`SessionEnded`,
+     `NeedsConfirmation`, `ActionResult`, `Reply`, `UnknownUtterance`, `NoSuchSkill`, `SkillDisabled`,
+     `MemorySet`/`MemoryForget`, `Error`, `TurnDone`.
+   - **Уровень приложения (вне ядра):** `ModelOutput` (сырой вывод LLM, для логов), `TtsReady`
+     (аудио готово), прогресс загрузок — это события слоя I/O, а не диалогового ядра.
    - Без `Unknown`/`_ =>`; на нереализованные ветки — `log::warn!`; имена ключей/маркеров —
      в константах (стиль `types/keys.rs` в opencode), а не сырые строки.
    - Логи — только на английском.
+
+   Первый срез ядра реализован в крейте `glas-core` (Qt-free, host-тесты); см. ниже «Реализовано».
 
 ## Почему так
 
@@ -47,5 +55,14 @@
 + Расширяемость пайплайна, единая точка диспетчеризации, компилятор помогает.
 + Тестируемость: автомат и диспетчер — чистая логика (в идеале — отдельный модуль/крейт без Qt).
 − Разовый рефактор `AppBridge` (свести три канала и `poll()` к одному worker'у).
+
+## Реализовано (2026-10-17)
+
+Первый срез ядра — крейт **`glas-core`** (`glas/glas/core/`), без Qt, на host-тестах:
+`Command`/`Event` (см. п.4), автомат хода, `SkillRegistry` + `BuiltinSkill` (фейковые таймер/SMS/
+громкость/будильник), сессии (`SessionStarted`/`SessionEnded`), `MemorySet`/`MemoryForget`,
+трейты движков (`TextGen`/`SpeechToText`/`TextToSpeech`) с фейками, сборка/разбор промпта.
+`Event`/`Command` — исчерпывающие, без catch-all. Что ещё впереди: `DeclarativeSkill`, модель
+ресурсов, события уровня приложения (`ModelOutput`/`TtsReady`/прогресс), model-store команды.
 
 См. [[Архитектура]], [[План]].
