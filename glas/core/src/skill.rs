@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+use crate::system::System;
+
 /// Concrete parameters extracted for a skill call.
 pub type Params = BTreeMap<String, Value>;
 
@@ -160,10 +162,11 @@ pub enum SkillError {
     Failed(String),
 }
 
-/// Execution context handed to a skill. Grows later (clock, D-Bus bridge);
-/// empty for now so the flow stays testable without I/O.
-#[derive(Debug, Default)]
-pub struct Ctx {}
+/// Execution context handed to a skill: the OS seam. Grows later (clock,
+/// cancellation); a borrow keeps the core free of I/O.
+pub struct Ctx<'a> {
+    pub system: &'a dyn System,
+}
 
 /// The single skill interface the core works with (`ADR-0007`).
 pub trait Skill {

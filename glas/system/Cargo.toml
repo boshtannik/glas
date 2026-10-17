@@ -1,0 +1,15 @@
+[package]
+name = "glas-system"
+version = "0.1.0"
+edition = "2021"
+description = "Glas OS primitives — the real System implementation (no Qt, host-buildable)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "glas_system"
+path = "src/lib.rs"
+
+[dependencies]
+glas-core = { path = "../core" }
+log = "0.4"

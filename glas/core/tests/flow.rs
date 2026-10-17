@@ -7,7 +7,17 @@ use glas_core::context::Role;
 use glas_core::engine::FakeGen;
 use glas_core::memory::SimpleMemory;
 use glas_core::registry::SkillRegistry;
+use glas_core::system::FakeSystem;
 use glas_core::{Command, Core, Event, TurnState};
+
+/// A `System` that answers any OS call with a successful timer cookie.
+fn fake_system() -> FakeSystem {
+    let sys = FakeSystem::new();
+    for cookie in 1..=16 {
+        sys.push(Ok(format!("event added, cookie is {cookie}")));
+    }
+    sys
+}
 
 fn core_with(script: Vec<&str>) -> Core {
     let gen = FakeGen::new(script.into_iter().map(String::from).collect());
@@ -15,6 +25,7 @@ fn core_with(script: Vec<&str>) -> Core {
         default_registry(),
         Box::new(SimpleMemory::new(8)),
         Box::new(gen),
+        Box::new(fake_system()),
     )
 }
 
@@ -245,7 +256,12 @@ fn disabled_skill_is_not_executed() {
     let gen = FakeGen::new(vec![
         r#"{"intent":"set_volume","params":{"level":50},"reply":""}"#.to_string(),
     ]);
-    let mut c = Core::new(reg, Box::new(SimpleMemory::new(8)), Box::new(gen));
+    let mut c = Core::new(
+        reg,
+        Box::new(SimpleMemory::new(8)),
+        Box::new(gen),
+        Box::new(fake_system()),
+    );
 
     let ev = c.handle(Command::Transcribed {
         text: "громкость 50".into(),

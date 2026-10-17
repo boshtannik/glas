@@ -10,6 +10,7 @@ use std::io::{self, Write};
 use glas_core::builtins::default_registry;
 use glas_core::engine::{EngineError, TextGen};
 use glas_core::memory::SimpleMemory;
+use glas_core::system::FakeSystem;
 use glas_core::{Command, Core, Event};
 
 /// A keyword "brain" that mimics the LLM's JSON output for a few phrases.
@@ -131,10 +132,18 @@ fn normalize_time(s: &str) -> String {
 }
 
 fn main() {
+    // The dev CLI is off-device: OS calls are faked (a canned timer cookie), so
+    // the whole flow still runs under `cargo run`. The real `System` lives in
+    // the app / `glas-system`.
+    let system = FakeSystem::new();
+    for cookie in 1..=16 {
+        system.push(Ok(format!("event added, cookie is {cookie}")));
+    }
     let mut core = Core::new(
         default_registry(),
         Box::new(SimpleMemory::new(8)),
         Box::new(RuleGen::new()),
+        Box::new(system),
     );
 
     println!("glas-cli — type an utterance (:yes/:no/:cancel/:q).");

@@ -14,6 +14,7 @@ use crate::memory::Memory;
 use crate::registry::SkillRegistry;
 use crate::skill::{Ctx, Data, Manifest, Outcome, ParamKind, Params, SkillError, Value};
 use crate::state::TurnState;
+use crate::system::System;
 
 /// An open dialogue session (a multi-step turn).
 #[derive(Debug)]
@@ -36,23 +37,28 @@ pub struct Core {
     registry: SkillRegistry,
     memory: Box<dyn Memory>,
     gen: Box<dyn TextGen>,
+    system: Box<dyn System>,
     session: Session,
     session_id: Option<u64>,
     next_session_id: u64,
-    ctx: Ctx,
 }
 
 impl Core {
-    pub fn new(registry: SkillRegistry, memory: Box<dyn Memory>, gen: Box<dyn TextGen>) -> Self {
+    pub fn new(
+        registry: SkillRegistry,
+        memory: Box<dyn Memory>,
+        gen: Box<dyn TextGen>,
+        system: Box<dyn System>,
+    ) -> Self {
         Self {
             state: TurnState::Idle,
             registry,
             memory,
             gen,
+            system,
             session: Session::None,
             session_id: None,
             next_session_id: 0,
-            ctx: Ctx::default(),
         }
     }
 
@@ -373,7 +379,10 @@ impl Core {
             .and_then(|p| p.question);
 
         if let Some(skill) = self.registry.get(skill_id) {
-            if let Ok(data) = skill.read(params, &self.ctx) {
+            let ctx = Ctx {
+                system: self.system.as_ref(),
+            };
+            if let Ok(data) = skill.read(params, &ctx) {
                 match data {
                     Data::List(items) if !items.is_empty() => {
                         let label = param_q.unwrap_or_else(|| "Какой из них?".to_string());
@@ -396,10 +405,14 @@ impl Core {
     fn execute(&mut self, skill_id: &str, params: &Params, ev: &mut Vec<Event>) {
         self.set_state(TurnState::Executing, ev);
 
-        let result = self
-            .registry
-            .get(skill_id)
-            .map(|s| s.execute(params, &self.ctx));
+        let result = {
+            let ctx = Ctx {
+                system: self.system.as_ref(),
+            };
+            self.registry
+                .get(skill_id)
+                .map(|s| s.execute(params, &ctx))
+        };
 
         match result {
             Some(Ok(outcome)) => {

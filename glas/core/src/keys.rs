@@ -27,3 +27,10 @@ pub const PARAM_TARGET: &str = "target";
 pub const PARAM_LEVEL: &str = "level";
 pub const PARAM_TO: &str = "to";
 pub const PARAM_TEXT: &str = "text";
+
+/// OS helpers and their argument markers (used by builtin skills via `System`).
+pub const PROGRAM_TIMEDCLIENT: &str = "timedclient-qt5";
+/// `APPLICATION=` value. Must match `[A-Za-z0-9_]+` — timed rejects a hyphen.
+pub const TIMED_APP: &str = "glas";
+pub const TIMED_TITLE: &str = "Таймер";
+pub const TIMED_STOP_BUTTON: &str = "Стоп";

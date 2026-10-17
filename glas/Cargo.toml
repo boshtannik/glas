@@ -21,6 +21,8 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 glas-memory = { path = "memory" }
+glas-core = { path = "core" }
+glas-system = { path = "system" }
 qmetaobject = { path = "vendor/qmetaobject-sfos-rs/qmetaobject" }
 sailors = { path = "vendor/sailors" }
 cpal = { version = "0.15", optional = true }
@@ -32,7 +34,7 @@ candle-transformers = { version = "0.11", default-features = false }
 tokenizers = { version = "0.22", default-features = false }
 
 [workspace]
-members = ["memory", "core"]
+members = ["memory", "core", "system"]
 
 [features]
 default = []

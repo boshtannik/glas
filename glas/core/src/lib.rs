@@ -20,6 +20,7 @@ pub mod memory;
 pub mod registry;
 pub mod skill;
 pub mod state;
+pub mod system;
 
 pub use command::Command;
 pub use dialog::Core;
