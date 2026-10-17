@@ -37,6 +37,8 @@ pub struct Core {
     memory: Box<dyn Memory>,
     gen: Box<dyn TextGen>,
     session: Session,
+    session_id: Option<u64>,
+    next_session_id: u64,
     ctx: Ctx,
 }
 
@@ -48,12 +50,19 @@ impl Core {
             memory,
             gen,
             session: Session::None,
+            session_id: None,
+            next_session_id: 0,
             ctx: Ctx::default(),
         }
     }
 
     pub fn state(&self) -> TurnState {
         self.state
+    }
+
+    /// The id of the open session, if any (`ADR-0011`).
+    pub fn session_id(&self) -> Option<u64> {
+        self.session_id
     }
 
     pub fn registry(&self) -> &SkillRegistry {
@@ -87,14 +96,26 @@ impl Core {
                 }
             }
             Command::Cancel => {
-                self.session = Session::None;
+                self.close_session(&mut ev);
                 self.set_state(TurnState::Idle, &mut ev);
                 ev.push(Event::TurnDone);
             }
             Command::Confirm { approved } => self.on_confirm(approved, &mut ev),
             Command::Transcribed { text } => self.on_transcribed(text, &mut ev),
+            Command::MemorySet { key, value } => match self.memory.set(&key, &value) {
+                Ok(()) => ev.push(Event::MemorySet { key, value }),
+                Err(e) => ev.push(Event::Error {
+                    message: e.to_string(),
+                }),
+            },
+            Command::MemoryForget { key } => match self.memory.forget(&key) {
+                Ok(()) => ev.push(Event::MemoryForget { key }),
+                Err(e) => ev.push(Event::Error {
+                    message: e.to_string(),
+                }),
+            },
             Command::Shutdown => {
-                self.session = Session::None;
+                self.close_session(&mut ev);
                 self.set_state(TurnState::Idle, &mut ev);
             }
         }
@@ -121,8 +142,16 @@ impl Core {
                 skill_id,
                 params,
                 missing,
-            } => self.run_clarified(&text, skill_id, params, missing, ev),
-            _ => self.run_intent(&text, ev),
+            } => {
+                self.close_session(ev);
+                self.run_clarified(&text, skill_id, params, missing, ev);
+            }
+            Session::Confirming { .. } => {
+                // A confirmation that was not a yes/no → exit into a new skill.
+                self.close_session(ev);
+                self.run_intent(&text, ev);
+            }
+            Session::None => self.run_intent(&text, ev),
         }
     }
 
@@ -268,10 +297,14 @@ impl Core {
         match self.validate_call(&call.intent, &call.params) {
             Ok(()) => {
                 if manifest.as_ref().map(|m| m.danger).unwrap_or(false) {
-                    self.session = Session::Confirming {
-                        skill_id: call.intent.clone(),
-                        params: call.params.clone(),
-                    };
+                    self.open_session(
+                        Session::Confirming {
+                            skill_id: call.intent.clone(),
+                            params: call.params.clone(),
+                        },
+                        &call.intent,
+                        ev,
+                    );
                     self.set_state(TurnState::AwaitingConfirmation, ev);
                     let reply = if call.reply.is_empty() {
                         format!(
@@ -310,11 +343,15 @@ impl Core {
         ev: &mut Vec<Event>,
     ) {
         let question = self.clarify_question(skill_id, &params, missing, base_reply);
-        self.session = Session::Clarifying {
-            skill_id: skill_id.to_string(),
-            params,
-            missing: missing.to_string(),
-        };
+        self.open_session(
+            Session::Clarifying {
+                skill_id: skill_id.to_string(),
+                params,
+                missing: missing.to_string(),
+            },
+            skill_id,
+            ev,
+        );
         // The mic is closed while we wait; the session stays open.
         self.set_state(TurnState::Idle, ev);
         ev.push(Event::Reply { text: question });
@@ -367,7 +404,7 @@ impl Core {
         match result {
             Some(Ok(outcome)) => {
                 self.memory
-                    .record_action(&action_line(skill_id, &outcome));
+                    .record_action(&action_line(skill_id, params, &outcome));
                 ev.push(Event::ActionResult {
                     skill_id: skill_id.to_string(),
                     summary: outcome.summary.clone(),
@@ -412,6 +449,7 @@ impl Core {
             }
             _ => {
                 log::warn!("Confirm received with no pending confirmation");
+                self.close_session(ev);
             }
         }
     }
@@ -434,19 +472,49 @@ impl Core {
         }
     }
 
+    /// Open a multi-step session and announce it (`ADR-0011`).
+    fn open_session(&mut self, session: Session, skill_id: &str, ev: &mut Vec<Event>) {
+        self.next_session_id += 1;
+        let id = self.next_session_id;
+        self.session = session;
+        self.session_id = Some(id);
+        ev.push(Event::SessionStarted {
+            session_id: id,
+            skill_id: skill_id.to_string(),
+        });
+    }
+
+    /// Close the open session (if any) and announce it.
+    fn close_session(&mut self, ev: &mut Vec<Event>) {
+        if let Some(id) = self.session_id.take() {
+            self.session = Session::None;
+            ev.push(Event::SessionEnded { session_id: id });
+        }
+    }
+
     fn finish(&mut self, ev: &mut Vec<Event>) {
-        self.session = Session::None;
+        self.close_session(ev);
         self.set_state(TurnState::Idle, ev);
         ev.push(Event::TurnDone);
     }
 }
 
-/// The compact context line for a finished action (with the OS id, if any).
-fn action_line(skill_id: &str, outcome: &Outcome) -> String {
+/// The compact context line for a finished action (params + the OS id, if any):
+/// `set_timer {duration_seconds:300} → ok, id=timer#1` (see `Контекст-и-память`).
+fn action_line(skill_id: &str, params: &Params, outcome: &Outcome) -> String {
     let status = if outcome.ok { "ok" } else { "fail" };
+    let params_str = if params.is_empty() {
+        String::new()
+    } else {
+        let pairs: Vec<String> = params
+            .iter()
+            .map(|(k, v)| format!("{k}:{}", v.as_display()))
+            .collect();
+        format!(" {{{}}}", pairs.join(", "))
+    };
     match &outcome.id {
-        Some(id) => format!("{skill_id} → {status}, id={id}"),
-        None => format!("{skill_id} → {status}"),
+        Some(id) => format!("{skill_id}{params_str} → {status}, id={id}"),
+        None => format!("{skill_id}{params_str} → {status}"),
     }
 }
 

@@ -19,8 +19,11 @@ pub const SKILL_SET_TIMER: &str = "set_timer";
 pub const SKILL_DELETE_TIMER: &str = "delete_timer";
 pub const SKILL_DELETE_ALARM: &str = "delete_alarm";
 pub const SKILL_SET_VOLUME: &str = "set_volume";
+pub const SKILL_SEND_SMS: &str = "send_sms";
 
 /// Parameter names shared across skills.
 pub const PARAM_DURATION_SECONDS: &str = "duration_seconds";
 pub const PARAM_TARGET: &str = "target";
 pub const PARAM_LEVEL: &str = "level";
+pub const PARAM_TO: &str = "to";
+pub const PARAM_TEXT: &str = "text";

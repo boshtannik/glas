@@ -78,7 +78,7 @@ impl SkillRegistry {
                     .iter()
                     .map(|p| {
                         let req = if p.required { "required" } else { "optional" };
-                        format!("{} ({req})", p.name)
+                        format!("{}:{} {req}", p.name, p.kind.type_name())
                     })
                     .collect();
                 out.push_str(&format!(" [params: {}]", params.join(", ")));
@@ -95,5 +95,19 @@ impl SkillRegistry {
 impl Default for SkillRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::builtins::default_registry;
+
+    #[test]
+    fn catalog_lists_param_types_and_requiredness() {
+        let cat = default_registry().catalog();
+        assert!(
+            cat.contains("duration_seconds:int required"),
+            "catalogue should name the type: {cat}"
+        );
     }
 }

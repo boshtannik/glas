@@ -173,6 +173,11 @@ fn print_event(event: &Event) {
     match event {
         Event::StateChanged(s) => println!("  [{s}]"),
         Event::Transcribed { text } => println!("  you: {text}"),
+        Event::SessionStarted {
+            session_id,
+            skill_id,
+        } => println!("  (session #{session_id} opened: {skill_id})"),
+        Event::SessionEnded { session_id } => println!("  (session #{session_id} closed)"),
         Event::NeedsConfirmation { reply, .. } => println!("  ASSISTANT (confirm?): {reply}"),
         Event::ActionResult { skill_id, summary, ok } => {
             println!("  action: {skill_id} (ok={ok}) {summary}")
@@ -181,6 +186,8 @@ fn print_event(event: &Event) {
         Event::UnknownUtterance { .. } => println!("  (unknown)"),
         Event::NoSuchSkill { intent } => println!("  (no such skill: {intent})"),
         Event::SkillDisabled { id } => println!("  (skill disabled: {id})"),
+        Event::MemorySet { key, value } => println!("  (memory set: {key}={value})"),
+        Event::MemoryForget { key } => println!("  (memory forget: {key})"),
         Event::Error { message } => println!("  ERROR: {message}"),
         Event::TurnDone => println!("  -- turn done --"),
     }

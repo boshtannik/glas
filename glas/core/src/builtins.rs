@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use crate::keys;
 use crate::skill::{
     Ctx, Data, Manifest, Outcome, ParamKind, ParamSpec, Params, Skill, SkillError, Value,
 };
@@ -33,14 +34,14 @@ impl Skill for SetTimerSkill {
         use std::sync::OnceLock;
         static M: OnceLock<Manifest> = OnceLock::new();
         M.get_or_init(|| Manifest {
-            id: "set_timer".to_string(),
+            id: keys::SKILL_SET_TIMER.to_string(),
             name: "Таймер".to_string(),
             description: "Поставить таймер на N минут".to_string(),
             examples: vec![
                 "поставь таймер на 5 минут".to_string(),
                 "таймер 10 мин".to_string(),
             ],
-            params: vec![ParamSpec::required("duration_seconds", ParamKind::Int)
+            params: vec![ParamSpec::required(keys::PARAM_DURATION_SECONDS, ParamKind::Int)
                 .with_range(1.0, 86400.0)
                 .with_question("На сколько минут?")],
             danger: false,
@@ -48,9 +49,13 @@ impl Skill for SetTimerSkill {
     }
 
     fn execute(&self, params: &Params, _ctx: &Ctx) -> Result<Outcome, SkillError> {
-        let secs = match params.get("duration_seconds") {
+        let secs = match params.get(keys::PARAM_DURATION_SECONDS) {
             Some(Value::Int(v)) => *v,
-            _ => return Err(SkillError::MissingParam("duration_seconds".to_string())),
+            _ => {
+                return Err(SkillError::MissingParam(
+                    keys::PARAM_DURATION_SECONDS.to_string(),
+                ))
+            }
         };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         Ok(Outcome::ok(format!("таймер на {} мин", secs / 60)).with_id(format!("timer#{id}")))
@@ -65,23 +70,24 @@ impl Skill for DeleteTimerSkill {
         use std::sync::OnceLock;
         static M: OnceLock<Manifest> = OnceLock::new();
         M.get_or_init(|| Manifest {
-            id: "delete_timer".to_string(),
+            id: keys::SKILL_DELETE_TIMER.to_string(),
             name: "Удалить таймер".to_string(),
             description: "Удалить таймер (по объекту/времени)".to_string(),
             examples: vec!["а теперь удали его".to_string(), "удали таймер".to_string()],
             params: vec![
-                ParamSpec::required("target", ParamKind::Str).with_question("Какой таймер?"),
+                ParamSpec::required(keys::PARAM_TARGET, ParamKind::Str)
+                    .with_question("Какой таймер?"),
             ],
             danger: false,
         })
     }
 
     fn execute(&self, params: &Params, _ctx: &Ctx) -> Result<Outcome, SkillError> {
-        match params.get("target") {
+        match params.get(keys::PARAM_TARGET) {
             Some(Value::Str(t)) if !t.is_empty() => {
                 Ok(Outcome::ok(format!("таймер {t} удалён")))
             }
-            _ => Err(SkillError::MissingParam("target".to_string())),
+            _ => Err(SkillError::MissingParam(keys::PARAM_TARGET.to_string())),
         }
     }
 
@@ -101,23 +107,24 @@ impl Skill for DeleteAlarmSkill {
         use std::sync::OnceLock;
         static M: OnceLock<Manifest> = OnceLock::new();
         M.get_or_init(|| Manifest {
-            id: "delete_alarm".to_string(),
+            id: keys::SKILL_DELETE_ALARM.to_string(),
             name: "Удалить будильник".to_string(),
             description: "Удалить будильник".to_string(),
             examples: vec!["удали будильник".to_string()],
             params: vec![
-                ParamSpec::required("target", ParamKind::Str).with_question("Какой будильник?"),
+                ParamSpec::required(keys::PARAM_TARGET, ParamKind::Str)
+                    .with_question("Какой будильник?"),
             ],
             danger: false,
         })
     }
 
     fn execute(&self, params: &Params, _ctx: &Ctx) -> Result<Outcome, SkillError> {
-        match params.get("target") {
+        match params.get(keys::PARAM_TARGET) {
             Some(Value::Str(t)) if !t.is_empty() => {
                 Ok(Outcome::ok(format!("будильник {t} удалён")))
             }
-            _ => Err(SkillError::MissingParam("target".to_string())),
+            _ => Err(SkillError::MissingParam(keys::PARAM_TARGET.to_string())),
         }
     }
 
@@ -138,11 +145,11 @@ impl Skill for SetVolumeSkill {
         use std::sync::OnceLock;
         static M: OnceLock<Manifest> = OnceLock::new();
         M.get_or_init(|| Manifest {
-            id: "set_volume".to_string(),
+            id: keys::SKILL_SET_VOLUME.to_string(),
             name: "Громкость".to_string(),
             description: "Установить громкость 0–100".to_string(),
             examples: vec!["громкость 50".to_string()],
-            params: vec![ParamSpec::required("level", ParamKind::Int)
+            params: vec![ParamSpec::required(keys::PARAM_LEVEL, ParamKind::Int)
                 .with_range(0.0, 100.0)
                 .with_question("На сколько процентов?")],
             danger: false,
@@ -150,9 +157,9 @@ impl Skill for SetVolumeSkill {
     }
 
     fn execute(&self, params: &Params, _ctx: &Ctx) -> Result<Outcome, SkillError> {
-        match params.get("level") {
+        match params.get(keys::PARAM_LEVEL) {
             Some(Value::Int(v)) => Ok(Outcome::ok(format!("громкость {v}"))),
-            _ => Err(SkillError::MissingParam("level".to_string())),
+            _ => Err(SkillError::MissingParam(keys::PARAM_LEVEL.to_string())),
         }
     }
 }
@@ -165,22 +172,22 @@ impl Skill for SendSmsSkill {
         use std::sync::OnceLock;
         static M: OnceLock<Manifest> = OnceLock::new();
         M.get_or_init(|| Manifest {
-            id: "send_sms".to_string(),
+            id: keys::SKILL_SEND_SMS.to_string(),
             name: "Отправить SMS".to_string(),
             description: "Отправить SMS (опасно)".to_string(),
             examples: vec!["отправь смс маме".to_string()],
             params: vec![
-                ParamSpec::required("to", ParamKind::Str),
-                ParamSpec::required("text", ParamKind::Str),
+                ParamSpec::required(keys::PARAM_TO, ParamKind::Str),
+                ParamSpec::required(keys::PARAM_TEXT, ParamKind::Str),
             ],
             danger: true,
         })
     }
 
     fn execute(&self, params: &Params, _ctx: &Ctx) -> Result<Outcome, SkillError> {
-        let to = match params.get("to") {
+        let to = match params.get(keys::PARAM_TO) {
             Some(Value::Str(s)) => s.clone(),
-            _ => return Err(SkillError::MissingParam("to".to_string())),
+            _ => return Err(SkillError::MissingParam(keys::PARAM_TO.to_string())),
         };
         Ok(Outcome::ok(format!("SMS отправлено: {to}")))
     }

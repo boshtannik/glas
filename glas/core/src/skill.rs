@@ -42,6 +42,19 @@ pub enum ParamKind {
     Enum(Vec<String>),
 }
 
+impl ParamKind {
+    /// Human-readable type name for the prompt catalogue.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ParamKind::Int => "int",
+            ParamKind::Float => "float",
+            ParamKind::Bool => "bool",
+            ParamKind::Str => "string",
+            ParamKind::Enum(_) => "enum",
+        }
+    }
+}
+
 /// One declared parameter of a skill.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamSpec {

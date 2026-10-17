@@ -35,15 +35,24 @@ pub enum IntentError {
 /// from memory (`ADR-0007`).
 pub fn build_prompt(registry: &SkillRegistry, memory: &dyn Memory, utterance: &str) -> String {
     let mut p = String::new();
-    p.push_str("You are Glas, a phone assistant. Choose the single best skill for the user.\n");
-    p.push_str("Return ONLY JSON: {\"intent\": <id>, \"params\": {..}, \"reply\": <text>}.\n");
-    p.push_str("If nothing fits, use intent \"unknown\".\n\n");
-    p.push_str("Skills:\n");
+    p.push_str("Ты — Glas, голосовой ассистент на телефоне. Выбери один наиболее подходящий навык.\n");
+    p.push_str("Верни ТОЛЬКО JSON: {\"intent\": <id>, \"params\": {..}, \"reply\": <текст>}.\n");
+    p.push_str("Если ничего не подходит — intent \"unknown\".\n");
+    p.push_str("Для запуска нужны ВСЕ обязательные параметры: если данных нет — задай уточняющий\n");
+    p.push_str("вопрос в \"reply\" и оставь params пустыми.\n\n");
+    p.push_str("Навыки:\n");
     p.push_str(&registry.catalog());
     p.push('\n');
 
+    p.push_str("Примеры:\n");
+    p.push_str("U: поставь таймер на 5 минут\n");
+    p.push_str("{\"intent\":\"set_timer\",\"params\":{\"duration_seconds\":300},\"reply\":\"Таймер на 5 минут\"}\n");
+    p.push_str("U: выключи свет\n");
+    p.push_str("{\"intent\":\"unknown\",\"params\":{},\"reply\":\"\"}\n");
+
     let system_line = memory.system_line();
     if !system_line.is_empty() {
+        p.push('\n');
         p.push_str(&system_line);
         p.push('\n');
     }
@@ -130,5 +139,34 @@ fn json_to_value(v: &Json) -> Value {
         }
         Json::String(s) => Value::Str(s.clone()),
         other => Value::Str(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtins::default_registry;
+    use crate::memory::SimpleMemory;
+
+    #[test]
+    fn prompt_is_russian_with_few_shots_and_catalog() {
+        let reg = default_registry();
+        let mem = SimpleMemory::default();
+        let p = build_prompt(&reg, &mem, "поставь таймер");
+
+        assert!(p.contains("Примеры:"), "few-shot section present");
+        assert!(p.contains("U: поставь таймер на 5 минут"));
+        assert!(p.contains("set_timer"), "catalogue present");
+        assert!(p.trim_end().ends_with("User: поставь таймер"));
+    }
+
+    #[test]
+    fn parses_json_surrounded_by_prose() {
+        let call = parse(
+            "конечно, вот: {\"intent\":\"set_timer\",\"params\":{\"duration_seconds\":300}} готово",
+        )
+        .unwrap();
+        assert_eq!(call.intent, "set_timer");
+        assert_eq!(call.params.get("duration_seconds"), Some(&Value::Int(300)));
     }
 }

@@ -18,9 +18,20 @@ pub enum EngineError {
     Exhausted,
 }
 
-/// Text generation (the LLM behind a seam).
+/// Text generation (the LLM behind a seam, `ADR-0009`).
 pub trait TextGen {
+    /// Load the model into memory. Real backends override this; the seam keeps a
+    /// no-op default so fakes and scripted generators need only `generate`.
+    fn load(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
     fn generate(&self, prompt: &str) -> Result<String, EngineError>;
+
+    /// Unload the model and free its memory. No-op by default.
+    fn unload(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
 }
 
 /// Speech-to-text.

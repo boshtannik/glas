@@ -266,3 +266,73 @@ fn cancel_aborts_and_returns_to_idle() {
     assert!(ev.contains(&Event::TurnDone));
     assert_eq!(c.state(), TurnState::Idle);
 }
+
+fn session_started(events: &[Event], skill: &str) -> Option<u64> {
+    events.iter().find_map(|e| match e {
+        Event::SessionStarted {
+            session_id,
+            skill_id,
+        } if skill_id == skill => Some(*session_id),
+        _ => None,
+    })
+}
+
+#[test]
+fn clarification_opens_and_closes_a_session() {
+    let mut c = core_with(vec![
+        r#"{"intent":"delete_alarm","params":{},"reply":""}"#,
+        r#"{"intent":"delete_alarm","params":{"target":"08:00"},"reply":""}"#,
+    ]);
+    let ev = c.handle(Command::Transcribed {
+        text: "удали будильник".into(),
+    });
+    let id = session_started(&ev, "delete_alarm").expect("clarifying session started");
+    assert_eq!(c.session_id(), Some(id));
+
+    let ev2 = c.handle(Command::Transcribed { text: "на 8".into() });
+    assert!(ev2.contains(&Event::SessionEnded { session_id: id }));
+    assert_eq!(c.session_id(), None);
+}
+
+#[test]
+fn confirmation_session_ends_on_confirm() {
+    let mut c = core_with(vec![
+        r#"{"intent":"send_sms","params":{"to":"мама","text":"привет"},"reply":""}"#,
+    ]);
+    let ev = c.handle(Command::Transcribed {
+        text: "отправь смс маме".into(),
+    });
+    let id = session_started(&ev, "send_sms").expect("confirming session started");
+
+    let ev2 = c.handle(Command::Confirm { approved: true });
+    assert!(ev2.contains(&Event::SessionEnded { session_id: id }));
+    assert_eq!(c.session_id(), None);
+}
+
+#[test]
+fn memory_set_and_forget_via_commands() {
+    let mut c = core_with(vec![]);
+    let ev = c.handle(Command::MemorySet {
+        key: "volume_default".into(),
+        value: "40".into(),
+    });
+    assert!(ev.contains(&Event::MemorySet {
+        key: "volume_default".into(),
+        value: "40".into(),
+    }));
+    assert!(c.memory().system_line().contains("volume_default=40"));
+
+    let ev2 = c.handle(Command::MemoryForget {
+        key: "volume_default".into(),
+    });
+    assert!(ev2.contains(&Event::MemoryForget {
+        key: "volume_default".into(),
+    }));
+}
+
+#[test]
+fn memory_forget_unknown_key_reports_error() {
+    let mut c = core_with(vec![]);
+    let ev = c.handle(Command::MemoryForget { key: "nope".into() });
+    assert!(ev.iter().any(|e| matches!(e, Event::Error { .. })));
+}
