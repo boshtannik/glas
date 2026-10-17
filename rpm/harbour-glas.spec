@@ -20,6 +20,20 @@ BuildRequires:  pkgconfig(sailfishapp)
 %global debug_package %{nil}
 %global __strip /bin/true
 
+# Heavy *helper* payload (whisper-cli, piper) is installed under %{payloaddir}
+# on the /home partition — a large (tens of GB) separate filesystem — and only
+# the /usr/libexec/%{name} symlink lives in /usr (on the small, often-full root
+# partition). The app addresses its helpers by absolute /usr/libexec paths,
+# which resolve through the symlink; the desktop file disables sailjail
+# sandboxing, so /home is reachable at runtime.
+#
+# NOTE: the GUI launcher (harbour-glas) MUST stay a real file in %{_bindir}.
+# libsailfishapp derives the app data dir from the *executable's directory*
+# (SailfishAppPriv::dataDir replaces the last path component of the exe's dir
+# with "share/"). A symlinked launcher resolves to /home/%{name}, so the app
+# would look for its QML under /home/share/%{name} → white screen.
+%define payloaddir /home/%{name}
+
 %description
 Glas — an on-device voice assistant for Sailfish OS: speech recognition,
 a local LLM, speech synthesis and skills that drive phone functions (timer,
@@ -72,11 +86,18 @@ ls -l /home/mersdk/cargo-cache/piper-aarch64/piper
 %install
 MODE="${MBUILD_MODE:-debug}"
 rm -rf %{buildroot}
+# GUI launcher → real file in %{_bindir} (see the NOTE above: its location
+# determines the app data dir). Heavy helpers → %{payloaddir} (on /home).
 install -Dm 755 /home/mersdk/cargo-cache/cargo/$MODE/aarch64-unknown-linux-gnu/$MODE/harbour-glas -t %{buildroot}%{_bindir}
-install -Dm 755 third_party/whisper.cpp/main %{buildroot}%{_libexecdir}/%{name}/whisper-cli
-mkdir -p %{buildroot}%{_libexecdir}/%{name}/piper
-cp -a /home/mersdk/cargo-cache/piper-aarch64/piper/. %{buildroot}%{_libexecdir}/%{name}/piper/
+PAYLOAD=%{buildroot}%{payloaddir}
+install -Dm 755 third_party/whisper.cpp/main $PAYLOAD/whisper-cli
+mkdir -p $PAYLOAD/piper
+cp -a /home/mersdk/cargo-cache/piper-aarch64/piper/. $PAYLOAD/piper/
 install -Dm 644 glas/assets/models.json -t %{buildroot}%{_datadir}/%{name}
+# /usr/libexec/%{name} is a symlink to %{payloaddir}; the app resolves its
+# helpers through it.
+install -d %{buildroot}%{_libexecdir}
+ln -s %{payloaddir} %{buildroot}%{_libexecdir}/%{name}
 # Launcher icons in all recommended sizes (Sailfish icon guidelines).
 for size in 86x86 108x108 128x128 172x172; do
   install -Dm 644 icons/$size/harbour-glas.png \
@@ -103,9 +124,9 @@ fi
 # - FILES ----------------------------------------------------------------------
 %files
 %defattr(-,root,root,-)
+%{payloaddir}
 %{_bindir}/harbour-glas
-%{_libexecdir}/%{name}/whisper-cli
-%{_libexecdir}/%{name}/piper
+%{_libexecdir}/%{name}
 %{_datadir}/%{name}/qml
 %{_datadir}/%{name}/models.json
 %{_datadir}/applications/%{name}.desktop
