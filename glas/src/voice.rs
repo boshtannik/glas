@@ -112,6 +112,33 @@ pub fn transcribe(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Whether a transcription carries no actual speech: empty output, or whisper's
+/// bracketed non-speech markers (`[no audio]`, `[BLANK_AUDIO]`, `[MUSIC]`, …).
+/// Such a turn must be abandoned before the model, never fed to it.
+pub fn is_no_speech(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return true;
+    }
+    // Known bare phrases some models emit on silence.
+    const BARE: &[&str] = &["no speech", "nospeech", "no audio"];
+    if BARE.iter().any(|b| t.eq_ignore_ascii_case(b)) {
+        return true;
+    }
+    // Otherwise: nothing left once bracketed markers are removed.
+    let mut outside = String::new();
+    let mut depth: u32 = 0;
+    for ch in t.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => outside.push(ch),
+            _ => {}
+        }
+    }
+    outside.trim().is_empty()
+}
+
 /// Encoder context size for a 16 kHz mono 16-bit WAV, in 20 ms frames.
 pub fn wav_audio_ctx(wav: &Path) -> u32 {
     let bytes = std::fs::metadata(wav).map(|m| m.len()).unwrap_or(0);

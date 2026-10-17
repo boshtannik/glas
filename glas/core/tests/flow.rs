@@ -233,7 +233,10 @@ fn unknown_utterance_is_reported() {
     assert!(ev
         .iter()
         .any(|e| matches!(e, Event::UnknownUtterance { .. })));
-    assert_eq!(reply_text(&ev), Some("Не понял."));
+    assert_eq!(
+        reply_text(&ev),
+        Some("Не разобрал: «абракадабра». Сформулируй иначе.")
+    );
 }
 
 #[test]
@@ -351,4 +354,96 @@ fn memory_forget_unknown_key_reports_error() {
     let mut c = core_with(vec![]);
     let ev = c.handle(Command::MemoryForget { key: "nope".into() });
     assert!(ev.iter().any(|e| matches!(e, Event::Error { .. })));
+}
+
+#[test]
+fn events_stream_in_turn_order() {
+    // `handle_into` must surface stages live, in order, before the turn ends.
+    let mut c = core_with(vec![
+        r#"{"intent":"set_timer","params":{"duration_seconds":5},"reply":""}"#,
+    ]);
+    let mut stages = Vec::new();
+    c.handle_into(Command::CaptureStart, &mut |e| {
+        if let Event::StateChanged(s) = e {
+            stages.push(s);
+        }
+    });
+    c.handle_into(Command::CaptureStop, &mut |e| {
+        if let Event::StateChanged(s) = e {
+            stages.push(s);
+        }
+    });
+    let mut reply: Option<String> = None;
+    let mut turn_done_at = None;
+    let mut last = 0;
+    c.handle_into(
+        Command::Transcribed {
+            text: "таймер на 5 секунд".into(),
+        },
+        &mut |e| {
+            last += 1;
+            match e {
+                Event::StateChanged(s) => {
+                    assert!(turn_done_at.is_none(), "state after TurnDone");
+                    stages.push(s);
+                }
+                Event::Reply { text } => reply = Some(text),
+                Event::TurnDone => turn_done_at = Some(last),
+                _ => {}
+            }
+        },
+    );
+    assert_eq!(
+        stages,
+        vec![
+            TurnState::Recording,
+            TurnState::Transcribing,
+            TurnState::Thinking,
+            TurnState::Executing,
+            TurnState::Speaking,
+            TurnState::Idle,
+        ]
+    );
+    assert!(reply.is_some(), "a reply was emitted");
+    assert_eq!(turn_done_at, Some(last), "TurnDone is the last event");
+}
+
+#[test]
+fn no_speech_aborts_without_calling_the_model() {
+    // The script is empty: if `NoSpeech` consulted the model, `FakeGen` would
+    // come back `Exhausted` and the core would emit `Event::Error`.
+    let mut c = core_with(vec![]);
+    c.handle(Command::CaptureStart);
+    c.handle(Command::CaptureStop);
+    let ev = c.handle(Command::NoSpeech);
+
+    assert!(!ev.iter().any(|e| matches!(e, Event::Error { .. })));
+    assert!(reply_text(&ev).is_none(), "no reply on silence");
+    assert!(ev.contains(&Event::TurnDone));
+    assert_eq!(c.state(), TurnState::Idle);
+}
+
+#[test]
+fn no_speech_keeps_a_pending_confirmation() {
+    let mut c = core_with(vec![
+        r#"{"intent":"send_sms","params":{"to":"мама","text":"привет"},"reply":""}"#,
+    ]);
+    c.handle(Command::Transcribed {
+        text: "отправь смс маме".into(),
+    });
+    let id = c.session_id().expect("confirming session");
+    assert_eq!(c.state(), TurnState::AwaitingConfirmation);
+
+    // A silent press while the confirmation is pending: the mic reopens and
+    // closes, but the session survives.
+    c.handle(Command::CaptureStart);
+    c.handle(Command::CaptureStop);
+    let ev = c.handle(Command::NoSpeech);
+    assert!(ev.contains(&Event::TurnDone));
+    assert_eq!(c.state(), TurnState::AwaitingConfirmation);
+    assert_eq!(c.session_id(), Some(id), "confirmation kept");
+
+    let ev2 = c.handle(Command::Confirm { approved: true });
+    assert!(has_action_result(&ev2, "send_sms"));
+    assert_eq!(c.state(), TurnState::Idle);
 }

@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
+use glas_core::{Command, Event, TurnState};
 use glas_memory::{now_secs, Memory, Source};
 use qmetaobject::*;
 
+use crate::bridge::agent::Agent;
 use crate::llm::LlmStore;
 use crate::settings::Settings;
 use crate::voice::{self, Recorder, VoiceStore};
@@ -23,6 +25,15 @@ pub struct AppBridge {
     /// Current status: "idle" | "recording" | "processing" | "error".
     status: qt_property!(QString; NOTIFY status_changed),
     status_changed: qt_signal!(),
+
+    /// Live stage text shown in the status bubble ("Слушаю…", "Обдумываю…", …).
+    /// Empty when nothing is happening.
+    stage: qt_property!(QString; NOTIFY stage_changed),
+    stage_changed: qt_signal!(),
+
+    /// Dialogue history as JSON: `[{"role":"user"|"assistant","text":"…"}]`.
+    history: qt_property!(QString; NOTIFY history_changed),
+    history_changed: qt_signal!(),
 
     /// Last assistant answer (feed/cover).
     answer: qt_property!(QString; NOTIFY answer_changed),
@@ -68,6 +79,12 @@ pub struct AppBridge {
     /// Result channel of the background LLM generation thread.
     gen_rx: Option<Receiver<Result<String, String>>>,
 
+    /// The dialogue worker: owns the core, fed commands, drained in `poll`.
+    agent: Agent,
+
+    /// Dialogue history backing the `history` JSON property (role, text).
+    chat: RefCell<Vec<(String, String)>>,
+
     /// True while the on-device LLM generates in the background.
     gen_busy: qt_property!(bool; NOTIFY gen_busy_changed),
     gen_busy_changed: qt_signal!(),
@@ -96,6 +113,7 @@ pub struct AppBridge {
             self.tts_busy = false;
             self.tts_busy_changed();
         }
+        self.agent.send(Command::Cancel);
         self.set_status_rs("idle");
     }),
 
@@ -111,6 +129,7 @@ pub struct AppBridge {
                 self.answer = QString::from("");
                 self.answer_changed();
                 self.set_status_rs("recording");
+                self.agent.send(Command::CaptureStart);
                 log::info!("bridge.ptt_start");
             }
             Err(e) => {
@@ -128,6 +147,7 @@ pub struct AppBridge {
             return;
         }
         let _ = self.recorder.stop();
+        self.agent.send(Command::CaptureStop);
         log::info!("bridge.ptt_stop");
 
         let model = match voice::resolve_model(&self.settings.stt_model) {
@@ -160,21 +180,7 @@ pub struct AppBridge {
     /// side never touches the audio device — playback is the UI's job, mirroring
     /// the reference app.
     tts_speak: qt_method!(fn tts_speak(&mut self, text: QString) {
-        let text = text.to_string();
-        if text.trim().is_empty() || self.tts_busy {
-            return;
-        }
-        log::info!("bridge.tts_speak ({} chars)", text.chars().count());
-        self.tts_cancel.store(false, Ordering::SeqCst);
-        let cancel = self.tts_cancel.clone();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let res = voice::synthesize(&text, &cancel);
-            let _ = tx.send(res.map(|p| p.to_string_lossy().into_owned()));
-        });
-        self.tts_rx = Some(rx);
-        self.tts_busy = true;
-        self.tts_busy_changed();
+        self.speak_text(&text.to_string());
     }),
 
     /// QML: stop playback and ask a running synthesis to be discarded.
@@ -251,38 +257,41 @@ pub struct AppBridge {
             }
         }
 
-        let msg = match self.rx.as_ref() {
-            Some(rx) => match rx.try_recv() {
-                Ok(res) => Some(res),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("worker stopped".to_string()))
+        // Transcription finished: hand the text to the dialogue core.
+        if let Some(rx) = self.rx.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(text)) => {
+                    self.rx = None;
+                    if voice::is_no_speech(&text) {
+                        // Nothing was said: abandon the turn instead of feeding
+                        // the model a bogus transcript (ADR-0008).
+                        log::info!("bridge.poll stt: no speech, abandoning the turn");
+                        self.agent.send(Command::NoSpeech);
+                    } else {
+                        log::info!("bridge.poll stt: {text:?}");
+                        self.agent.send(Command::Transcribed { text });
+                        self.set_status_rs("processing");
+                    }
                 }
-            },
-            None => None,
-        };
-        let res = match msg {
-            Some(res) => res,
-            None => return,
-        };
-        self.rx = None;
-        match res {
-            Ok(text) => {
-                let text = if text.is_empty() {
-                    "(no speech)".to_string()
-                } else {
-                    text
-                };
-                log::info!("bridge.poll: {text:?}");
-                self.answer = QString::from(text);
-            }
-            Err(e) => {
-                log::warn!("bridge.poll error: {e}");
-                self.answer = QString::from(format!("error: {e}"));
+                Ok(Err(e)) => {
+                    self.rx = None;
+                    log::warn!("bridge.poll stt error: {e}");
+                    self.answer = QString::from(format!("error: {e}"));
+                    self.answer_changed();
+                    self.set_status_rs("error");
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.rx = None;
+                    self.set_status_rs("error");
+                }
             }
         }
-        self.answer_changed();
-        self.set_status_rs("idle");
+
+        // Drain the core's events (streamed one by one; a turn may emit several).
+        while let Some(event) = self.agent.try_event() {
+            self.apply_event(event);
+        }
     }),
 
     /// QML: voice store snapshot (`{models, stt, tts, lang, langs, version}`).
@@ -400,5 +409,126 @@ impl AppBridge {
     pub fn set_status_rs(&mut self, s: &str) {
         self.status = QString::from(s);
         self.status_changed();
+    }
+
+    /// Synthesize `text` in the background and hand the WAV path to QML.
+    fn speak_text(&mut self, text: &str) {
+        if text.trim().is_empty() || self.tts_busy {
+            return;
+        }
+        log::info!("bridge.speak ({} chars)", text.chars().count());
+        self.tts_cancel.store(false, Ordering::SeqCst);
+        let cancel = self.tts_cancel.clone();
+        let text = text.to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let res = voice::synthesize(&text, &cancel);
+            let _ = tx.send(res.map(|p| p.to_string_lossy().into_owned()));
+        });
+        self.tts_rx = Some(rx);
+        self.tts_busy = true;
+        self.tts_busy_changed();
+    }
+
+    /// Append a bubble to the dialogue history and refresh the `history` JSON.
+    fn push_bubble(&mut self, role: &str, text: &str) {
+        self.chat
+            .borrow_mut()
+            .push((role.to_string(), text.to_string()));
+        let json = self.chat_json();
+        self.history = QString::from(json);
+        self.history_changed();
+    }
+
+    fn chat_json(&self) -> String {
+        let chat = self.chat.borrow();
+        let arr: Vec<serde_json::Value> = chat
+            .iter()
+            .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
+            .collect();
+        serde_json::Value::Array(arr).to_string()
+    }
+
+    /// Update the live stage bubble (`""` hides it).
+    fn set_stage(&mut self, s: &str) {
+        if self.stage.to_string() == s {
+            return;
+        }
+        self.stage = QString::from(s);
+        self.stage_changed();
+    }
+
+    /// Apply one core event to the bridge's UI state.
+    fn apply_event(&mut self, event: Event) {
+        match event {
+            Event::StateChanged(state) => {
+                self.set_status_rs(state_status(state));
+                self.set_stage(stage_text(state));
+            }
+            Event::Transcribed { text } => {
+                log::info!("core heard: {text:?}");
+                self.push_bubble("user", &text);
+            }
+            Event::Reply { text } => {
+                self.answer = QString::from(text.as_str());
+                self.answer_changed();
+                self.push_bubble("assistant", &text);
+                if self.settings.tts_mode == "auto" {
+                    self.speak_text(&text);
+                }
+            }
+            Event::NeedsConfirmation { reply, .. } => {
+                self.answer = QString::from(reply.as_str());
+                self.answer_changed();
+                self.push_bubble("assistant", &reply);
+                if self.settings.tts_mode == "auto" {
+                    self.speak_text(&reply);
+                }
+            }
+            Event::ActionResult { skill_id, summary, ok } => {
+                log::info!("action {skill_id} ok={ok}: {summary}");
+            }
+            Event::Error { message } => {
+                log::warn!("core error: {message}");
+            }
+            Event::SessionStarted {
+                session_id,
+                skill_id,
+            } => log::info!("session #{session_id} opened ({skill_id})"),
+            Event::SessionEnded { session_id } => {
+                log::info!("session #{session_id} closed")
+            }
+            Event::UnknownUtterance { text } => log::info!("unknown utterance: {text:?}"),
+            Event::NoSuchSkill { intent } => log::warn!("no such skill: {intent}"),
+            Event::SkillDisabled { id } => log::warn!("skill disabled: {id}"),
+            Event::MemorySet { key, .. } => log::info!("memory set: {key}"),
+            Event::MemoryForget { key } => log::info!("memory forget: {key}"),
+            Event::TurnDone => {}
+        }
+    }
+}
+
+/// Map the core's turn state to the three UI statuses the QML understands
+/// ("idle" | "recording" | "processing").
+fn state_status(state: TurnState) -> &'static str {
+    match state {
+        TurnState::Idle | TurnState::AwaitingConfirmation => "idle",
+        TurnState::Recording => "recording",
+        TurnState::Transcribing | TurnState::Thinking | TurnState::Executing | TurnState::Speaking => {
+            "processing"
+        }
+    }
+}
+
+/// Human stage text for the live status bubble (`""` for idle).
+fn stage_text(state: TurnState) -> &'static str {
+    match state {
+        TurnState::Idle => "",
+        TurnState::Recording => "Слушаю…",
+        TurnState::Transcribing => "Перевожу в текст…",
+        TurnState::Thinking => "Обдумываю…",
+        TurnState::AwaitingConfirmation => "Жду подтверждения…",
+        TurnState::Executing => "Выполняю…",
+        TurnState::Speaking => "Озвучиваю ответ…",
     }
 }

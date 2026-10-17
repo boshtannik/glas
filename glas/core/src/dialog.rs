@@ -1,9 +1,14 @@
 //! The turn state machine and dialogue sessions.
 //!
-//! This is the "worker + automaton" of `ADR-0008`, kept pure: `handle(command)`
-//! advances the machine and returns the events to emit. Sessions
+//! This is the "worker + automaton" of `ADR-0008`, kept pure: the entry points
+//! advance the machine and emit the events to surface. Sessions
 //! (confirmation / clarification) and the "exit into a new skill" rule live here
 //! (`ADR-0011`, `ADR-0012`).
+//!
+//! Events are pushed into a [`Sink`] as the turn advances, so a UI can show live
+//! stages (recording → transcribing → thinking → executing → speaking).
+//! [`Core::handle`] is the collecting wrapper used by the CLI and the tests;
+//! [`Core::handle_into`] streams each event the moment it happens.
 
 use crate::command::Command;
 use crate::engine::TextGen;
@@ -15,6 +20,10 @@ use crate::registry::SkillRegistry;
 use crate::skill::{Ctx, Data, Manifest, Outcome, ParamKind, Params, SkillError, Value};
 use crate::state::TurnState;
 use crate::system::System;
+
+/// Where a turn's events go. `Core::handle` collects them into a `Vec`; the app
+/// forwards each one to the UI as it is produced.
+pub type Sink<'a> = &'a mut dyn FnMut(Event);
 
 /// An open dialogue session (a multi-step turn).
 #[derive(Debug)]
@@ -83,59 +92,65 @@ impl Core {
         self.memory.as_ref()
     }
 
-    /// The single entry point: apply a command, get back the events to emit.
+    /// The single entry point: apply a command, collect the emitted events.
     pub fn handle(&mut self, cmd: Command) -> Vec<Event> {
         let mut ev = Vec::new();
+        self.handle_into(cmd, &mut |e| ev.push(e));
+        ev
+    }
+
+    /// Streaming entry point: emit each event as the turn advances.
+    pub fn handle_into(&mut self, cmd: Command, sink: Sink) {
         match cmd {
             Command::CaptureStart => {
                 if self.state == TurnState::Idle || self.state == TurnState::AwaitingConfirmation {
-                    self.set_state(TurnState::Recording, &mut ev);
+                    self.set_state(TurnState::Recording, sink);
                 } else {
                     log::warn!("CaptureStart ignored in state {}", self.state);
                 }
             }
             Command::CaptureStop => {
                 if self.state == TurnState::Recording {
-                    self.set_state(TurnState::Transcribing, &mut ev);
+                    self.set_state(TurnState::Transcribing, sink);
                 } else {
                     log::warn!("CaptureStop ignored in state {}", self.state);
                 }
             }
             Command::Cancel => {
-                self.close_session(&mut ev);
-                self.set_state(TurnState::Idle, &mut ev);
-                ev.push(Event::TurnDone);
+                self.close_session(&mut *sink);
+                self.set_state(TurnState::Idle, &mut *sink);
+                sink(Event::TurnDone);
             }
-            Command::Confirm { approved } => self.on_confirm(approved, &mut ev),
-            Command::Transcribed { text } => self.on_transcribed(text, &mut ev),
+            Command::Confirm { approved } => self.on_confirm(approved, sink),
+            Command::Transcribed { text } => self.on_transcribed(text, sink),
+            Command::NoSpeech => self.on_no_speech(sink),
             Command::MemorySet { key, value } => match self.memory.set(&key, &value) {
-                Ok(()) => ev.push(Event::MemorySet { key, value }),
-                Err(e) => ev.push(Event::Error {
+                Ok(()) => sink(Event::MemorySet { key, value }),
+                Err(e) => sink(Event::Error {
                     message: e.to_string(),
                 }),
             },
             Command::MemoryForget { key } => match self.memory.forget(&key) {
-                Ok(()) => ev.push(Event::MemoryForget { key }),
-                Err(e) => ev.push(Event::Error {
+                Ok(()) => sink(Event::MemoryForget { key }),
+                Err(e) => sink(Event::Error {
                     message: e.to_string(),
                 }),
             },
             Command::Shutdown => {
-                self.close_session(&mut ev);
-                self.set_state(TurnState::Idle, &mut ev);
+                self.close_session(&mut *sink);
+                self.set_state(TurnState::Idle, &mut *sink);
             }
         }
-        ev
     }
 
     /// A new utterance is available (from STT, the CLI or a test).
-    fn on_transcribed(&mut self, text: String, ev: &mut Vec<Event>) {
-        ev.push(Event::Transcribed { text: text.clone() });
+    fn on_transcribed(&mut self, text: String, sink: Sink) {
+        sink(Event::Transcribed { text: text.clone() });
 
         // Voice confirmation: a yes/no while a confirmation is pending.
         if let Session::Confirming { .. } = self.session {
             if let Some(approved) = yes_no(&text) {
-                self.on_confirm(approved, ev);
+                self.on_confirm(approved, sink);
                 return;
             }
         }
@@ -149,22 +164,22 @@ impl Core {
                 params,
                 missing,
             } => {
-                self.close_session(ev);
-                self.run_clarified(&text, skill_id, params, missing, ev);
+                self.close_session(&mut *sink);
+                self.run_clarified(&text, skill_id, params, missing, sink);
             }
             Session::Confirming { .. } => {
                 // A confirmation that was not a yes/no → exit into a new skill.
-                self.close_session(ev);
-                self.run_intent(&text, ev);
+                self.close_session(&mut *sink);
+                self.run_intent(&text, sink);
             }
-            Session::None => self.run_intent(&text, ev),
+            Session::None => self.run_intent(&text, sink),
         }
     }
 
     /// Interpret `text` with the model without dispatching it. Returns `None`
     /// (after emitting `Event::Error`) if the model backend failed.
-    fn interpret(&mut self, text: &str, ev: &mut Vec<Event>) -> Option<IntentCall> {
-        self.set_state(TurnState::Thinking, ev);
+    fn interpret(&mut self, text: &str, sink: Sink) -> Option<IntentCall> {
+        self.set_state(TurnState::Thinking, &mut *sink);
         let prompt = intent::build_prompt(&self.registry, self.memory.as_ref(), text);
         self.memory.record_user(text);
 
@@ -175,7 +190,7 @@ impl Core {
                 reply: String::new(),
             })),
             Err(e) => {
-                ev.push(Event::Error {
+                sink(Event::Error {
                     message: e.to_string(),
                 });
                 None
@@ -183,10 +198,10 @@ impl Core {
         }
     }
 
-    fn run_intent(&mut self, text: &str, ev: &mut Vec<Event>) {
-        match self.interpret(text, ev) {
-            Some(call) => self.dispatch(call, text, ev),
-            None => self.finish(ev),
+    fn run_intent(&mut self, text: &str, sink: Sink) {
+        match self.interpret(text, &mut *sink) {
+            Some(call) => self.dispatch(call, text, sink),
+            None => self.finish(sink),
         }
     }
 
@@ -201,10 +216,10 @@ impl Core {
         skill_id: String,
         mut params: Params,
         missing: String,
-        ev: &mut Vec<Event>,
+        sink: Sink,
     ) {
-        let Some(call) = self.interpret(text, ev) else {
-            self.finish(ev);
+        let Some(call) = self.interpret(text, &mut *sink) else {
+            self.finish(sink);
             return;
         };
 
@@ -220,7 +235,7 @@ impl Core {
                     reply: call.reply,
                 },
                 text,
-                ev,
+                sink,
             );
         } else if call.intent.is_empty() || call.intent == keys::INTENT_UNKNOWN {
             // The model could not read the bare answer — fill the missing
@@ -233,11 +248,11 @@ impl Core {
                     reply: String::new(),
                 },
                 text,
-                ev,
+                sink,
             );
         } else {
             // A different command → exit into a new skill.
-            self.dispatch(call, text, ev);
+            self.dispatch(call, text, sink);
         }
     }
 
@@ -265,37 +280,37 @@ impl Core {
         }
     }
 
-    fn dispatch(&mut self, call: IntentCall, text: &str, ev: &mut Vec<Event>) {
+    fn dispatch(&mut self, call: IntentCall, text: &str, sink: Sink) {
         if call.intent.is_empty() || call.intent == keys::INTENT_UNKNOWN {
-            ev.push(Event::UnknownUtterance {
+            sink(Event::UnknownUtterance {
                 text: text.to_string(),
             });
-            ev.push(Event::Reply {
-                text: "Не понял.".to_string(),
+            sink(Event::Reply {
+                text: unparsed_reply(text),
             });
-            self.finish(ev);
+            self.finish(sink);
             return;
         }
 
         if !self.registry.contains(&call.intent) {
-            ev.push(Event::NoSuchSkill {
+            sink(Event::NoSuchSkill {
                 intent: call.intent.clone(),
             });
-            ev.push(Event::Reply {
+            sink(Event::Reply {
                 text: format!("Такого навыка нет: {}", call.intent),
             });
-            self.finish(ev);
+            self.finish(sink);
             return;
         }
 
         if !self.registry.is_enabled(&call.intent) {
-            ev.push(Event::SkillDisabled {
+            sink(Event::SkillDisabled {
                 id: call.intent.clone(),
             });
-            ev.push(Event::Reply {
+            sink(Event::Reply {
                 text: format!("Навык выключен: {}", call.intent),
             });
-            self.finish(ev);
+            self.finish(sink);
             return;
         }
 
@@ -309,9 +324,9 @@ impl Core {
                             params: call.params.clone(),
                         },
                         &call.intent,
-                        ev,
+                        sink,
                     );
-                    self.set_state(TurnState::AwaitingConfirmation, ev);
+                    self.set_state(TurnState::AwaitingConfirmation, &mut *sink);
                     let reply = if call.reply.is_empty() {
                         format!(
                             "Подтвердить «{}»?",
@@ -320,22 +335,22 @@ impl Core {
                     } else {
                         call.reply.clone()
                     };
-                    ev.push(Event::NeedsConfirmation {
+                    sink(Event::NeedsConfirmation {
                         skill_id: call.intent.clone(),
                         reply,
                     });
                 } else {
-                    self.execute(&call.intent, &call.params, ev);
+                    self.execute(&call.intent, &call.params, sink);
                 }
             }
             Err(SkillError::MissingParam(name)) => {
-                self.ask_missing(&call.intent, call.params.clone(), &name, &call.reply, ev);
+                self.ask_missing(&call.intent, call.params.clone(), &name, &call.reply, sink);
             }
             Err(other) => {
-                ev.push(Event::Reply {
+                sink(Event::Reply {
                     text: format!("Не получилось: {other}"),
                 });
-                self.finish(ev);
+                self.finish(sink);
             }
         }
     }
@@ -346,7 +361,7 @@ impl Core {
         params: Params,
         missing: &str,
         base_reply: &str,
-        ev: &mut Vec<Event>,
+        sink: Sink,
     ) {
         let question = self.clarify_question(skill_id, &params, missing, base_reply);
         self.open_session(
@@ -356,11 +371,11 @@ impl Core {
                 missing: missing.to_string(),
             },
             skill_id,
-            ev,
+            sink,
         );
         // The mic is closed while we wait; the session stays open.
-        self.set_state(TurnState::Idle, ev);
-        ev.push(Event::Reply { text: question });
+        self.set_state(TurnState::Idle, &mut *sink);
+        sink(Event::Reply { text: question });
     }
 
     /// Build the clarifying question. If the skill can `read`, use the concrete
@@ -402,8 +417,8 @@ impl Core {
         format!("Уточни, пожалуйста: {missing}.")
     }
 
-    fn execute(&mut self, skill_id: &str, params: &Params, ev: &mut Vec<Event>) {
-        self.set_state(TurnState::Executing, ev);
+    fn execute(&mut self, skill_id: &str, params: &Params, sink: Sink) {
+        self.set_state(TurnState::Executing, &mut *sink);
 
         let result = {
             let ctx = Ctx {
@@ -418,53 +433,70 @@ impl Core {
             Some(Ok(outcome)) => {
                 self.memory
                     .record_action(&action_line(skill_id, params, &outcome));
-                ev.push(Event::ActionResult {
+                sink(Event::ActionResult {
                     skill_id: skill_id.to_string(),
                     summary: outcome.summary.clone(),
                     ok: outcome.ok,
                 });
-                self.set_state(TurnState::Speaking, ev);
-                ev.push(Event::Reply {
+                self.set_state(TurnState::Speaking, &mut *sink);
+                sink(Event::Reply {
                     text: outcome.summary,
                 });
             }
             Some(Err(e)) => {
                 log::warn!("skill {skill_id} failed: {e}");
-                ev.push(Event::Error {
+                sink(Event::Error {
                     message: e.to_string(),
                 });
-                ev.push(Event::Reply {
+                sink(Event::Reply {
                     text: format!("Не получилось: {e}"),
                 });
             }
             None => {
-                ev.push(Event::Error {
+                sink(Event::Error {
                     message: format!("unknown skill: {skill_id}"),
                 });
             }
         }
 
-        self.finish(ev);
+        self.finish(sink);
     }
 
-    fn on_confirm(&mut self, approved: bool, ev: &mut Vec<Event>) {
+    fn on_confirm(&mut self, approved: bool, sink: Sink) {
         let session = std::mem::replace(&mut self.session, Session::None);
         match session {
             Session::Confirming { skill_id, params } => {
                 if approved {
-                    self.execute(&skill_id, &params, ev);
+                    self.execute(&skill_id, &params, sink);
                 } else {
-                    ev.push(Event::Reply {
+                    sink(Event::Reply {
                         text: "Отменено.".to_string(),
                     });
-                    self.finish(ev);
+                    self.finish(sink);
                 }
             }
             _ => {
                 log::warn!("Confirm received with no pending confirmation");
-                self.close_session(ev);
+                self.close_session(sink);
             }
         }
+    }
+
+    /// The capture produced no speech. Leave `Transcribing` without consulting
+    /// the model. A pending session stays open — the mic is merely closed again —
+    /// so a silent press does not drop a confirmation.
+    fn on_no_speech(&mut self, sink: Sink) {
+        if self.state != TurnState::Transcribing {
+            log::warn!("NoSpeech ignored in state {}", self.state);
+            return;
+        }
+        match self.session {
+            Session::Confirming { .. } => {
+                self.set_state(TurnState::AwaitingConfirmation, &mut *sink)
+            }
+            _ => self.set_state(TurnState::Idle, &mut *sink),
+        }
+        sink(Event::TurnDone);
     }
 
     fn manifest_of(&self, id: &str) -> Option<Manifest> {
@@ -478,37 +510,37 @@ impl Core {
         }
     }
 
-    fn set_state(&mut self, next: TurnState, ev: &mut Vec<Event>) {
+    fn set_state(&mut self, next: TurnState, sink: Sink) {
         if self.state != next {
             self.state = next;
-            ev.push(Event::StateChanged(next));
+            sink(Event::StateChanged(next));
         }
     }
 
     /// Open a multi-step session and announce it (`ADR-0011`).
-    fn open_session(&mut self, session: Session, skill_id: &str, ev: &mut Vec<Event>) {
+    fn open_session(&mut self, session: Session, skill_id: &str, sink: Sink) {
         self.next_session_id += 1;
         let id = self.next_session_id;
         self.session = session;
         self.session_id = Some(id);
-        ev.push(Event::SessionStarted {
+        sink(Event::SessionStarted {
             session_id: id,
             skill_id: skill_id.to_string(),
         });
     }
 
     /// Close the open session (if any) and announce it.
-    fn close_session(&mut self, ev: &mut Vec<Event>) {
+    fn close_session(&mut self, sink: Sink) {
         if let Some(id) = self.session_id.take() {
             self.session = Session::None;
-            ev.push(Event::SessionEnded { session_id: id });
+            sink(Event::SessionEnded { session_id: id });
         }
     }
 
-    fn finish(&mut self, ev: &mut Vec<Event>) {
-        self.close_session(ev);
-        self.set_state(TurnState::Idle, ev);
-        ev.push(Event::TurnDone);
+    fn finish(&mut self, sink: Sink) {
+        self.close_session(&mut *sink);
+        self.set_state(TurnState::Idle, &mut *sink);
+        sink(Event::TurnDone);
     }
 }
 
@@ -528,6 +560,17 @@ fn action_line(skill_id: &str, params: &Params, outcome: &Outcome) -> String {
     match &outcome.id {
         Some(id) => format!("{skill_id}{params_str} → {status}, id={id}"),
         None => format!("{skill_id}{params_str} → {status}"),
+    }
+}
+
+/// The reply when the model could not turn an utterance into an intent. Shared
+/// with the UI wording: name what we heard, so a misfire reads as *our* failure.
+fn unparsed_reply(text: &str) -> String {
+    let heard = text.trim();
+    if heard.is_empty() {
+        "Не разобрал команду. Скажи иначе.".to_string()
+    } else {
+        format!("Не разобрал: «{heard}». Сформулируй иначе.")
     }
 }
 

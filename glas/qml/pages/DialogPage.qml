@@ -35,6 +35,29 @@ Page {
         }
     }
 
+    // Dialogue history, mirrored from the bridge's JSON property.
+    ListModel { id: historyModel }
+
+    function rebuildHistory() {
+        if (typeof bridge === "undefined")
+            return
+        var items = []
+        try {
+            items = JSON.parse(bridge.history)
+        } catch (e) {
+            items = []
+        }
+        historyModel.clear()
+        for (var i = 0; i < items.length; i++)
+            historyModel.append(items[i])
+        historyView.positionViewAtEnd()
+    }
+
+    Connections {
+        target: (typeof bridge !== "undefined") ? bridge : null
+        onHistory_changed: dialogPage.rebuildHistory()
+    }
+
     PageHeader {
         id: pageHeader
         title: qsTr("Glas")
@@ -64,8 +87,8 @@ Page {
         }
     }
 
-    // Transcript / status area above the push-to-talk button.
-    SilicaFlickable {
+    // Transcript (history bubbles) + the live status bubble, above push-to-talk.
+    Item {
         id: transcript
         anchors {
             top: pageHeader.bottom
@@ -73,30 +96,95 @@ Page {
             right: parent.right
             bottom: inputPanel.top
         }
-        contentHeight: column.height + Theme.paddingLarge
-        clip: true
 
-        Column {
-            id: column
-            width: parent.width
-            spacing: Theme.paddingLarge
-            topPadding: Theme.paddingLarge
+        // One bubble per dialogue line; the user's on the right, Glas's on the left.
+        ListView {
+            id: historyView
+            anchors {
+                left: parent.left
+                right: parent.right
+                top: parent.top
+                bottom: parent.bottom
+                bottomMargin: liveBubble.visible
+                    ? liveBubble.height + 2 * Theme.paddingMedium
+                    : 0
+            }
+            clip: true
+            spacing: Theme.paddingMedium
+            topMargin: Theme.paddingLarge
+            bottomMargin: Theme.paddingMedium
+            model: historyModel
 
-            Label {
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: parent.width - 2 * Theme.horizontalPageMargin
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.Wrap
-                text: (typeof bridge !== "undefined") ? bridge.status : "idle"
-                color: Theme.secondaryColor
+            delegate: Item {
+                width: historyView.width
+                height: bubble.height
+
+                Rectangle {
+                    id: bubble
+                    property bool isUser: model.role === "user"
+                    anchors.top: parent.top
+                    anchors.left: isUser ? undefined : parent.left
+                    anchors.right: isUser ? parent.right : undefined
+                    anchors.leftMargin: Theme.horizontalPageMargin
+                    anchors.rightMargin: Theme.horizontalPageMargin
+                    width: Math.min(bubbleLabel.implicitWidth, historyView.width * 0.78)
+                        + 2 * Theme.paddingMedium
+                    height: bubbleLabel.height + 2 * Theme.paddingMedium
+                    radius: Theme.paddingMedium
+                    color: isUser
+                        ? Theme.rgba(Theme.highlightColor, 0.22)
+                        : Theme.rgba(Theme.primaryColor, 0.10)
+
+                    Label {
+                        id: bubbleLabel
+                        x: Theme.paddingMedium
+                        y: Theme.paddingMedium
+                        width: Math.min(implicitWidth, historyView.width * 0.78)
+                        wrapMode: Text.Wrap
+                        text: model.text
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.primaryColor
+                    }
+                }
+            }
+        }
+
+        // Live status: the current stage of the turn, updated in real time
+        // ("Слушаю…" → "Перевожу в текст…" → "Обдумываю…" → "Озвучиваю ответ…").
+        Rectangle {
+            id: liveBubble
+            visible: liveText() !== ""
+            anchors {
+                left: parent.left
+                bottom: parent.bottom
+                leftMargin: Theme.horizontalPageMargin
+                bottomMargin: Theme.paddingMedium
+            }
+            width: Math.min(liveLabel.implicitWidth, historyView.width * 0.78)
+                + 2 * Theme.paddingMedium
+            height: liveLabel.height + 2 * Theme.paddingMedium
+            radius: Theme.paddingMedium
+            color: Theme.rgba(Theme.highlightColor, 0.18)
+
+            function liveText() {
+                if (typeof bridge === "undefined")
+                    return ""
+                if (bridge.stage !== "")
+                    return bridge.stage
+                if (dialogPage.speaking)
+                    return "Озвучиваю ответ…"
+                return ""
             }
 
             Label {
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: parent.width - 2 * Theme.horizontalPageMargin
-                horizontalAlignment: Text.AlignHCenter
+                id: liveLabel
+                x: Theme.paddingMedium
+                y: Theme.paddingMedium
+                width: Math.min(implicitWidth, historyView.width * 0.78)
                 wrapMode: Text.Wrap
-                text: (typeof bridge !== "undefined") ? bridge.answer : ""
+                text: liveBubble.liveText()
+                font.pixelSize: Theme.fontSizeSmall
+                font.italic: true
                 color: Theme.highlightColor
             }
         }

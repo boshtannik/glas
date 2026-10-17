@@ -20,6 +20,9 @@ pub enum Command {
     /// A transcript is available (from STT, the dev CLI or a test). This is the
     /// entry point of a turn once audio has been recognised.
     Transcribed { text: String },
+    /// The capture produced no speech (silence, or whisper's bracketed marker
+    /// such as `[no audio]`). Abandons the turn *without* consulting the model.
+    NoSpeech,
     /// Store a durable user preference (the UI's "remember this").
     MemorySet { key: String, value: String },
     /// Forget a durable user preference.
