@@ -1,0 +1,13 @@
+#!/bin/sh
+# Universal launcher: picks the static gen-icon binary matching this machine.
+# Usage: same as the binary — gen-icon [--out DIR] [--svg PATH] [--seed N]
+set -e
+DIR="$(cd "$(dirname "$0")" && pwd)"
+case "$(uname -m)" in
+    x86_64)          BIN="$DIR/dist/gen-icon-x86_64" ;;
+    i386|i486|i586|i686) BIN="$DIR/dist/gen-icon-i686" ;;
+    aarch64|arm64)   BIN="$DIR/dist/gen-icon-aarch64" ;;
+    armv7l|armv6l)   BIN="$DIR/dist/gen-icon-armv7" ;;
+    *) echo "gen-icon: unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+exec "$BIN" "$@"

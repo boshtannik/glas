@@ -33,6 +33,18 @@ chmod 777 "$CACHE" "$CACHE/cargo"
 chmod 777 "$OUT"
 rm -f "$OUT"/*.rpm
 
+# A fresh launcher icon for every build: random-gradient SVG, rasterized into
+# icons/ (the spec packs those PNGs into the RPM). Static Rust binary, no
+# Python/cairosvg needed on the build host.
+"$PROJ/tools/gen-icon/gen-icon" --out "$PROJ/icons" --svg "$PROJ/harbour-glas.svg"
+
+# Bump Release so the phone/repo sees each build as an update
+# (same NEVRA would not refresh the launcher icon).
+SPEC="$PROJ/rpm/harbour-glas.spec"
+REL="$(sed -n 's/^Release:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SPEC")"
+sed -i "s/^Release:.*/Release:    $((REL + 1))/" "$SPEC"
+echo "release: $REL -> $((REL + 1))"
+
 docker run --rm \
   -e MBUILD_MODE="$MODE" \
   -e CARGO_HOME=/home/mersdk/cargo-cache/cargo-home \

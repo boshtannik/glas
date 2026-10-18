@@ -21,3 +21,6 @@ glas/target/
 # Local editor settings
 .idea/
 *.swp
+
+# gen-icon Rust build artifacts
+tools/gen-icon/target/
