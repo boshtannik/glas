@@ -39,7 +39,7 @@ rm -f "$OUT"/*.rpm
 "$PROJ/tools/gen-icon/gen-icon" --out "$PROJ/icons" --svg "$PROJ/harbour-glas.svg"
 
 # Bump Release so the phone/repo sees each build as an update
-# (same NEVRA would not refresh the launcher icon).
+# (standard RPM versioning: X.Y.Z-N, Release grows on every build).
 SPEC="$PROJ/rpm/harbour-glas.spec"
 REL="$(sed -n 's/^Release:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SPEC")"
 sed -i "s/^Release:.*/Release:    $((REL + 1))/" "$SPEC"

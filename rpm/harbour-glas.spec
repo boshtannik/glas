@@ -1,6 +1,6 @@
 Name:       harbour-glas
 Summary:    Glas — a voice assistant that controls the phone
-Version:    0.1
+Version:    0.1.0
 Release:    1
 Group:      Qt/Qt
 License:    MIT
