@@ -183,12 +183,28 @@ impl Core {
         let prompt = intent::build_prompt(&self.registry, self.memory.as_ref(), text);
         self.memory.record_user(text);
 
+        let started = std::time::Instant::now();
         match self.gen.generate(&prompt) {
-            Ok(raw) => Some(intent::parse(&raw).unwrap_or(IntentCall {
-                intent: keys::INTENT_UNKNOWN.to_string(),
-                params: Params::new(),
-                reply: String::new(),
-            })),
+            Ok(raw) => {
+                let secs = started.elapsed().as_secs_f32();
+                log::info!(
+                    "intent: model answered in {:.1}s ({} chars): {}",
+                    secs,
+                    raw.len(),
+                    clip(&raw, 400)
+                );
+                match intent::parse(&raw) {
+                    Ok(call) => Some(call),
+                    Err(e) => {
+                        log::warn!("intent: parse failed ({e}); falling back to unknown");
+                        Some(IntentCall {
+                            intent: keys::INTENT_UNKNOWN.to_string(),
+                            params: Params::new(),
+                            reply: String::new(),
+                        })
+                    }
+                }
+            }
             Err(e) => {
                 sink(Event::Error {
                     message: e.to_string(),
@@ -572,6 +588,16 @@ fn unparsed_reply(text: &str) -> String {
     } else {
         format!("Не разобрал: «{heard}». Сформулируй иначе.")
     }
+}
+
+/// Shorten a string for logging, keeping the head and marking the cut.
+fn clip(s: &str, max: usize) -> String {
+    let t = s.trim();
+    if t.chars().count() <= max {
+        return t.to_string();
+    }
+    let head: String = t.chars().take(max).collect();
+    format!("{head}…")
 }
 
 /// A tiny yes/no recogniser for voice confirmation (Russian first).
